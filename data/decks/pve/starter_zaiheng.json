@@ -1,0 +1,19 @@
+{
+  "id": "starter_zaiheng",
+  "name": "宰衡君初始牌组",
+  "daomaster_id": "zaiheng_jun",
+  "cards": [
+    "chengdao_linglu_order_beast",
+    "chengdao_sunken_marsh_spirit",
+    "chengdao_stele_stone_beast",
+    "daofa_mountain_seal",
+    "daofa_mountain_seal",
+    "daofa_mountain_seal",
+    "daofa_fire_spark",
+    "daofa_fire_spark",
+    "daofa_tide_cut",
+    "formation_tide_gate",
+    "formation_tide_gate",
+    "trap_broken_law"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "starter_fuguan_v1",
+  "name": "负棺僧 v1 初始牌组",
+  "daomaster_id": "fuguan_seng",
+  "version": "v1",
+  "cards": [
+    "fuguan_songlu",
+    "fuguan_songlu",
+    "fuguan_angui",
+    "fuguan_guizang_spark",
+    "fuguan_wuzang_order",
+    "fuguan_coffin_wisp",
+    "fuguan_burial_beast",
+    "shared_return_bone_spark",
+    "shared_burial_road_sign",
+    "shared_return_rift_beast",
+    "universal_breaking_style",
+    "universal_body_guard"
+  ]
+}

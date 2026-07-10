@@ -1,0 +1,23 @@
+{
+  "id": "starter_side_deck",
+  "name": "承道初始副卡组",
+  "type": "side_deck",
+  "required_count": 15,
+  "cards": [
+    "chengdao_linglu_order_beast",
+    "chengdao_dream_crane",
+    "chengdao_sunken_marsh_spirit",
+    "chengdao_warped_dream_beast",
+    "chengdao_rift_bone_beast",
+    "daofa_tide_cut",
+    "daofa_moon_drop",
+    "daofa_backflow_burst",
+    "formation_dragon_spine",
+    "formation_bone_mist",
+    "trap_broken_law",
+    "trap_murk_snare",
+    "dao_mark_ember",
+    "domain_tide_realm",
+    "artifact_moon_ruler"
+  ]
+}

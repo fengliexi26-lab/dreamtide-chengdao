@@ -1,0 +1,12 @@
+{
+  "id": "starter_character_lineup",
+  "name": "承道初始人物阵列",
+  "type": "character_lineup",
+  "required_count": 3,
+  "match_rule": "每场最多三局的 Match 中，每局开始前从尚未出战的人物牌中选择 1 张作为本局道主。",
+  "characters": [
+    "character_jinghui_youth",
+    "character_jiang_hengyue",
+    "character_pei_zhaochuan"
+  ]
+}

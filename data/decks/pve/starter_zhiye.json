@@ -1,0 +1,19 @@
+{
+  "id": "starter_zhiye",
+  "name": "织夜君初始牌组",
+  "daomaster_id": "zhiye_jun",
+  "cards": [
+    "chengdao_dream_crane",
+    "chengdao_dream_crane",
+    "chengdao_warped_dream_beast",
+    "daofa_dream_thread",
+    "daofa_dream_thread",
+    "daofa_dream_thread",
+    "daofa_tide_cut",
+    "daofa_mountain_seal",
+    "formation_tide_gate",
+    "trap_murk_snare",
+    "trap_murk_snare",
+    "domain_tide_realm"
+  ]
+}

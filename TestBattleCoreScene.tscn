@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://drnp3qx2rhu4n"]
+
+[ext_resource type="Script" uid="uid://cmiyxwsuafrdr" path="res://scripts/core/TestBattleCore.gd" id="1_ntecv"]
+
+[node name="Node" type="Node" unique_id=1948249979]
+script = ExtResource("1_ntecv")

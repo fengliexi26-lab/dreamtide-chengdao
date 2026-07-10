@@ -1,0 +1,19 @@
+{
+  "id": "starter_fuguan",
+  "name": "负棺僧初始牌组",
+  "daomaster_id": "fuguan_seng",
+  "cards": [
+    "chengdao_huichao_chaos_beast",
+    "chengdao_huichao_chaos_beast",
+    "chengdao_rift_bone_beast",
+    "chengdao_backflow_ancient_beast",
+    "chengdao_unwaking_shadow",
+    "daofa_tide_cut",
+    "daofa_tide_cut",
+    "daofa_fire_spark",
+    "daofa_fire_spark",
+    "formation_tide_gate",
+    "trap_murk_snare",
+    "dao_mark_ember"
+  ]
+}
