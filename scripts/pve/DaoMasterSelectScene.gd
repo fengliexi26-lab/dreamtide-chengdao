@@ -3,8 +3,10 @@ extends Control
 const DAOMASTER_DATA_PATH := "res://data/daomasters/daomasters_v0.json"
 const CARD_DATA_PATH := "res://data/cards/cards_v0.json"
 const STARTER_DECK_DIR := "res://data/decks/pve/"
+const PVE_V1_DECK_DIR := "res://data/decks/pve_v1/"
 const BATTLE_SCENE_PATH := "res://scenes/battle/BattleScene.tscn"
 const RunStateScript = preload("res://scripts/pve/RunState.gd")
+const PveCardV1CatalogScript = preload("res://scripts/pve/PveCardV1Catalog.gd")
 
 var daomasters: Array = []
 var cards_by_id := {}
@@ -337,8 +339,23 @@ func _on_start_pressed() -> void:
 		status_label.text = "该道主尚未解封：%s" % str(selected_daomaster.get("lock_reason", "后续版本开放"))
 		start_button.disabled = true
 		return
-	var starter_deck_id := str(selected_daomaster.get("starter_deck_id", ""))
-	var starter_cards := _load_starter_deck_cards(starter_deck_id)
+	var daomaster_id := str(selected_daomaster.get("id", ""))
+	var v1_deck_path := _v1_starter_deck_path(daomaster_id)
+	if v1_deck_path == "":
+		status_label.text = "无法开始：该道主没有 v1 初始牌组。"
+		push_error("[DaoMasterSelectScene] missing v1 starter deck for %s" % daomaster_id)
+		return
+	var catalog = PveCardV1CatalogScript.new()
+	if not catalog.load_catalog():
+		status_label.text = "无法开始：v1 卡池读取失败。"
+		push_error("[DaoMasterSelectScene] v1 catalog errors: %s" % str(catalog.get_load_errors()))
+		return
+	var deck_result: Dictionary = catalog.load_starter_deck(v1_deck_path, daomaster_id, selected_daomaster)
+	if not bool(deck_result.get("ok", false)):
+		status_label.text = "无法开始：v1 初始牌组无效。"
+		push_error("[DaoMasterSelectScene] v1 starter deck errors: %s" % str(deck_result.get("errors", [])))
+		return
+	var starter_cards: Array = deck_result.get("card_ids", []).duplicate(true)
 	if starter_cards.is_empty():
 		status_label.text = "无法开始：初始牌组为空或读取失败。"
 		return
@@ -346,6 +363,7 @@ func _on_start_pressed() -> void:
 	start_button.disabled = true
 	var run_state = RunStateScript.new()
 	run_state.start_new(selected_daomaster, starter_cards)
+	run_state.enable_pve_card_v1(v1_deck_path, starter_cards)
 	RunStateScript.set_current(run_state)
 	status_label.text = "RunState 已创建，进入战斗..."
 	print("[DaoMasterSelectScene] %s" % run_state.debug_summary())
@@ -355,6 +373,18 @@ func _on_start_pressed() -> void:
 		push_error(status_label.text)
 		starting_run = false
 		start_button.disabled = false
+
+
+func _v1_starter_deck_path(daomaster_id: String) -> String:
+	match daomaster_id:
+		"zaiheng_jun":
+			return PVE_V1_DECK_DIR + "starter_zaiheng_v1.json"
+		"zhiye_jun":
+			return PVE_V1_DECK_DIR + "starter_zhiye_v1.json"
+		"fuguan_seng":
+			return PVE_V1_DECK_DIR + "starter_fuguan_v1.json"
+		_:
+			return ""
 
 
 func _load_starter_deck_cards(starter_deck_id: String) -> Array:

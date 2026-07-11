@@ -50,7 +50,7 @@ func configure(card: Dictionary) -> void:
 			if dao_text != "":
 				dao_text += "、"
 			dao_text += str(tag)
-	var effect_text := str(card.get("text", ""))
+	var effect_text := _effect_text(card)
 	if effect_text.length() > 14:
 		effect_text = effect_text.substr(0, 14) + "..."
 	if card_name.length() > 7:
@@ -67,7 +67,7 @@ func configure(card: Dictionary) -> void:
 			int(card.get("life", card.get("base_life", 0)))
 		]
 	text = "费 %d\n%s\n%s%s\n道脉 %s%s\n%s" % [cost, card_name, card_type, kind_line, dao_text, stat_line, effect_text]
-	tooltip_text = "%s\n%s%s\n费用 %d\n道脉 %s\n%s" % [card_name, card_type, kind_line, cost, dao_text, str(card.get("text", ""))]
+	tooltip_text = "%s\n%s%s\n费用 %d\n道脉 %s\n%s" % [card_name, card_type, kind_line, cost, dao_text, _effect_text(card)]
 
 
 func set_selected(is_selected: bool) -> void:
@@ -104,3 +104,11 @@ func _display_chengdao_kind(value: String) -> String:
 	if value == "character":
 		return "人物"
 	return value
+
+
+func _effect_text(card: Dictionary) -> String:
+	for field in ["text", "effect_text", "description"]:
+		var value := str(card.get(field, ""))
+		if value != "":
+			return value
+	return ""
