@@ -179,6 +179,17 @@ func build_battle_instances(card_ids: Array) -> Array:
 		instance["base_card_id"] = card_id
 		instance["instance_id"] = "%s#%d" % [card_id, _instance_counter]
 		instance["runtime_state"] = {}
+		instance["data_version"] = "pve_v1"
+		instance["type"] = str(instance.get("card_type", ""))
+		instance["description"] = str(instance.get("description", instance.get("effect_text", "")))
+		if str(instance.get("card_type", "")) == "chengdao":
+			var summon_spec := _effect_adapter.get_summon_spec(instance)
+			instance["attack"] = int(summon_spec.get("attack", 0))
+			instance["life"] = int(summon_spec.get("life", 0))
+			instance["base_life"] = int(summon_spec.get("life", 0))
+			instance["side"] = str(summon_spec.get("side", instance.get("side", "neutral")))
+			instance["chengdao_kind"] = str(summon_spec.get("chengdao_kind", instance.get("subtype", "")))
+			instance["dao_tags"] = summon_spec.get("dao_tags", instance.get("dao_tags", [])).duplicate(true)
 		instances.append(instance)
 	return instances
 

@@ -6,6 +6,8 @@ const STARTER_CHARACTER_LINEUP_PATH := "res://data/decks/starter_character_lineu
 const PVE_STARTER_DECK_DIR := "res://data/decks/pve/"
 const RunStateScript = preload("res://scripts/pve/RunState.gd")
 const PassiveRuntimeScript = preload("res://scripts/pve/DaomasterPassiveRuntime.gd")
+const PveCardV1CatalogScript = preload("res://scripts/pve/PveCardV1Catalog.gd")
+const PveCardEffectAdapterScript = preload("res://scripts/pve/PveCardEffectAdapter.gd")
 const MAIN_DECK_SIZE := 40
 const SIDE_DECK_SIZE := 15
 const HAND_LIMIT := 10
@@ -61,6 +63,10 @@ var draw_pile: Array[Dictionary] = []
 var discard_pile: Array[Dictionary] = []
 var exhaust_pile: Array[Dictionary] = []
 var passive_runtime
+var pve_card_catalog
+var pve_effect_adapter
+var pve_card_data_mode := "legacy_fallback"
+var pve_card_fallback_reason := ""
 var extra_stats := {}
 var active_dao_masters: Dictionary = {}
 var dao_strike_used := {}
@@ -566,22 +572,44 @@ func _start_pve_battle() -> void:
 	if log_view != null:
 		log_view.clear()
 
-	var cards := _load_cards()
+	pve_card_catalog = null
+	pve_effect_adapter = PveCardEffectAdapterScript.new()
+	pve_card_data_mode = "legacy_fallback"
+	pve_card_fallback_reason = ""
 	var run_state = RunStateScript.get_current()
 	var has_run_state := run_state != null and bool(run_state.run_started)
 	var starter_deck_ids: Array[String] = []
 	var player_master: Dictionary = {}
-	if has_run_state:
+	var pve_deck: Array[Dictionary] = []
+	var use_v1_run := has_run_state and bool(run_state.uses_pve_card_v1) and str(run_state.card_data_version) == "pve_v1" and str(run_state.starter_deck_path) != ""
+	if use_v1_run:
 		player_master = run_state.to_daomaster_card()
-		starter_deck_ids = _run_deck_ids(run_state)
+		var v1_setup := _build_v1_pve_deck(run_state)
+		if not bool(v1_setup.get("ok", false)):
+			_start_pve_battle_load_error(str(v1_setup.get("reason", "v1 卡池读取失败。")), run_state)
+			return
+		pve_deck = v1_setup.get("deck", [])
+		pve_card_data_mode = "pve_v1"
+		_log("[BattleScene] PVE card data mode: pve_v1")
+		_log("[BattleScene] v1 deck loaded: %s / %d cards." % [run_state.selected_daomaster_id, pve_deck.size()])
 	else:
-		_log("未检测到 RunState，使用测试道主 fallback。")
-		var character_lineup := _load_character_lineup(cards)
-		starter_deck_ids = _load_pve_starter_deck_ids("starter_zaiheng")
-		player_master = character_lineup[0] if character_lineup.size() > 0 else {}
-		player_master["passive_id"] = "hengjie"
-		player_master["passive_name"] = "衡界"
-		player_master["passive_desc"] = "每个玩家回合第一次获得阵势时，额外获得 2 点阵势。"
+		var cards := _load_cards()
+		if has_run_state:
+			player_master = run_state.to_daomaster_card()
+			starter_deck_ids = _run_deck_ids(run_state)
+			pve_card_fallback_reason = "RunState 未启用 v1 卡池。"
+		else:
+			pve_card_fallback_reason = "未检测到 RunState。"
+			_log("未检测到 RunState，使用测试道主 fallback。")
+			var character_lineup := _load_character_lineup(cards)
+			starter_deck_ids = _load_pve_starter_deck_ids("starter_zaiheng")
+			player_master = character_lineup[0] if character_lineup.size() > 0 else {}
+			player_master["passive_id"] = "hengjie"
+			player_master["passive_name"] = "衡界"
+			player_master["passive_desc"] = "每个玩家回合第一次获得阵势时，额外获得 2 点阵势。"
+		pve_deck = _make_deck(cards, starter_deck_ids, 0)
+		_log("[BattleScene] PVE card data mode: legacy_fallback")
+		_log("[BattleScene] fallback reason: %s" % pve_card_fallback_reason)
 	var player := _create_player_from_dao_master("p1", "玩家", player_master)
 	if has_run_state:
 		_apply_run_state_to_player(player, run_state)
@@ -594,7 +622,6 @@ func _start_pve_battle() -> void:
 	var enemy_dummy := PlayerState.new("enemy_dummy", "敌人", Realm.Rank.HUANG_RANG, [])
 	enemy_dummy.max_life_source = 80
 	enemy_dummy.life_source = 80
-	var pve_deck := _make_deck(cards, starter_deck_ids, 0)
 	player.deck.clear()
 	player.hand.clear()
 	game_state = GameState.new([player, enemy_dummy])
@@ -603,7 +630,7 @@ func _start_pve_battle() -> void:
 	_setup_pve_piles_from_deck(pve_deck)
 	_reset_pve_enemy()
 	if has_run_state:
-		_log("PVE RunState 已接入：%s，牌组 %d 张。" % [_dao_master_name(player), starter_deck_ids.size()])
+		_log("PVE RunState 已接入：%s，牌组 %d 张。" % [_dao_master_name(player), pve_deck.size()])
 		_log(run_state.debug_summary())
 	if passive_runtime != null and passive_runtime.get_passive_name() != "":
 		_log("道主被动：%s。" % passive_runtime.get_passive_name())
@@ -645,6 +672,51 @@ func _run_deck_ids(run_state) -> Array[String]:
 	for card_id in run_state.current_deck:
 		ids.append(str(card_id))
 	return ids
+
+
+func _build_v1_pve_deck(run_state) -> Dictionary:
+	var result := {"ok": false, "reason": "", "deck": []}
+	pve_card_catalog = PveCardV1CatalogScript.new()
+	if not pve_card_catalog.load_catalog():
+		result.reason = "v1 卡池读取失败：%s" % str(pve_card_catalog.get_load_errors())
+		return result
+	var deck_result: Dictionary = pve_card_catalog.load_starter_deck(
+		str(run_state.starter_deck_path),
+		str(run_state.selected_daomaster_id),
+		{"dao_tags": run_state.dao_tags}
+	)
+	if not bool(deck_result.get("ok", false)):
+		result.reason = "v1 初始牌组无效：%s" % str(deck_result.get("errors", []))
+		return result
+	var card_ids: Array = deck_result.get("card_ids", []).duplicate(true)
+	var instances: Array = pve_card_catalog.build_battle_instances(card_ids)
+	if instances.size() != card_ids.size():
+		result.reason = "v1 战斗实例数量异常：%d / %d。" % [instances.size(), card_ids.size()]
+		return result
+	result.ok = true
+	result.deck = instances
+	return result
+
+
+func _start_pve_battle_load_error(reason: String, run_state) -> void:
+	pve_card_data_mode = "pve_v1_error"
+	card_load_error = reason
+	push_error("[BattleScene] %s" % reason)
+	var player_master: Dictionary = run_state.to_daomaster_card() if run_state != null else {}
+	var player := _create_player_from_dao_master("p1", "玩家", player_master)
+	if run_state != null:
+		_apply_run_state_to_player(player, run_state)
+	var enemy_dummy := PlayerState.new("enemy_dummy", "敌人", Realm.Rank.HUANG_RANG, [])
+	enemy_dummy.max_life_source = 80
+	enemy_dummy.life_source = 80
+	game_state = GameState.new([player, enemy_dummy])
+	game_state.active_player_index = 0
+	_reset_pve_enemy()
+	game_over = true
+	_log("PVE 战斗无法开始：%s" % reason)
+	if operation_hint_label != null:
+		operation_hint_label.text = "v1 卡池加载失败，请查看 Output。"
+	_refresh_all()
 
 
 func _apply_run_state_to_player(player: PlayerState, run_state) -> void:
@@ -898,7 +970,7 @@ func _setup_pve_piles_from_deck(deck: Array[Dictionary]) -> void:
 	_log("抽牌堆已建立：%d 张。" % draw_pile.size())
 
 
-func _draw_pve_cards(player: PlayerState, amount: int) -> void:
+func _draw_pve_cards(player: PlayerState, amount: int) -> int:
 	var drawn := 0
 	for i in range(amount):
 		if player.hand.size() >= HAND_LIMIT:
@@ -920,6 +992,7 @@ func _draw_pve_cards(player: PlayerState, amount: int) -> void:
 			drawn += 1
 			_log("%s抽到【%s】，进入手牌。" % [player.display_name, str(card.get("name", "未知卡牌"))])
 	_log("抽牌 %d 张。" % drawn)
+	return drawn
 
 
 func _shuffle_discard_into_draw_pile() -> void:
@@ -937,6 +1010,7 @@ func gain_formation(amount: int, source: String = "", allow_passive: bool = true
 	player.formation_value += amount
 	if allow_passive and game_mode == "pve" and passive_runtime != null:
 		passive_runtime.on_formation_gained(amount, source)
+	_sync_run_state_resources(player)
 	return amount
 
 
@@ -947,6 +1021,7 @@ func add_current_daoxi(amount: int, source: String = "") -> int:
 	var stats: Dictionary = extra_stats.get(player.id, {"dao_breath": 0, "return_tide": 0})
 	stats["dao_breath"] = maxi(0, int(stats.get("dao_breath", 0)) + amount)
 	extra_stats[player.id] = stats
+	_sync_run_state_resources(player)
 	return int(stats.get("dao_breath", 0))
 
 
@@ -974,11 +1049,23 @@ func _card_has_keyword(card: Dictionary, keywords: Array[String]) -> bool:
 	for keyword in raw_keywords:
 		if keywords.has(str(keyword)):
 			return true
+	if _is_pve_v1_card(card):
+		return false
 	for field in ["effect_text", "description"]:
 		var text := str(card.get(field, ""))
 		for keyword in keywords:
 			if text.find(keyword) >= 0:
 				return true
+	return false
+
+
+func _is_pve_v1_card(card: Dictionary) -> bool:
+	if card.is_empty():
+		return false
+	if str(card.get("data_version", "")) == "pve_v1":
+		return true
+	if pve_effect_adapter != null:
+		return pve_effect_adapter.is_v1_card(card)
 	return false
 
 
@@ -1144,6 +1231,9 @@ func _on_central_battlefield_pressed() -> void:
 		return
 	var player := game_state.get_active_player()
 	var card_type := str(selected_card.get("type", ""))
+	if _is_pve_v1_card(selected_card):
+		_play_v1_selected_card(player, "self")
+		return
 	if card_type == CardTypes.DAOFA:
 		_show_failure("道法牌需要选择敌方道主或敌方承道兽。")
 		return
@@ -1355,6 +1445,115 @@ func _on_board_slot_selected(slot_type: String, index: int, board_index: int) ->
 	_check_game_over()
 
 
+func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
+	if selected_card.is_empty():
+		_show_failure("请先选择手牌。")
+		return
+	var card := selected_card.duplicate(true)
+	var unavailable_reason := _get_unavailable_reason(card, player)
+	if unavailable_reason != "":
+		_show_failure(unavailable_reason)
+		return
+	var validation_reason := _validate_v1_target_and_capacity(card, target_mode)
+	if validation_reason != "":
+		_show_failure(validation_reason)
+		return
+	var card_name := str(card.get("name", "未知卡牌"))
+	_pay_card_cost(player, card)
+	_remove_selected_from_source(player)
+	Breakthrough.add_dao_progress(player, 5)
+	_log("%s打出了【%s】。" % [player.display_name, card_name])
+
+	var put_into_resolved_pile := true
+	var effects: Array = pve_effect_adapter.get_effects(card)
+	for effect in effects:
+		if typeof(effect) != TYPE_DICTIONARY:
+			continue
+		var effect_type := str(effect.get("type", ""))
+		var value := int(effect.get("value", 0))
+		match effect_type:
+			"deal_damage":
+				var actual := _damage_enemy(value)
+				_log("【%s】对%s造成 %d 点伤害。" % [card_name, str(enemy.get("name", "敌人")), actual])
+			"gain_formation":
+				gain_formation(value, card_name)
+				_log("【%s】获得 %d 点阵势。" % [card_name, value])
+			"draw":
+				var drawn := _draw_pve_cards(player, value)
+				_log("【%s】抽 %d 张牌。" % [card_name, drawn])
+			"gain_daoxi":
+				var current_daoxi := add_current_daoxi(value, card_name)
+				_log("【%s】获得 %d 点道息，当前道息 %d。" % [card_name, value, current_daoxi])
+			"gain_reflux":
+				_add_return_tide(player, value)
+				_log("【%s】回潮值 +%d，当前回潮值 %d。" % [card_name, value, _get_return_tide(player)])
+			"reduce_reflux":
+				_add_return_tide(player, -value)
+				_log("【%s】回潮值 -%d，当前回潮值 %d。" % [card_name, value, _get_return_tide(player)])
+			"summon":
+				_resolve_v1_summon(player, card)
+				put_into_resolved_pile = false
+	if put_into_resolved_pile:
+		_put_card_into_pve_resolved_pile(card)
+	_clear_selection()
+	_refresh_all()
+	_check_game_over()
+
+
+func _validate_v1_target_and_capacity(card: Dictionary, target_mode: String) -> String:
+	if pve_effect_adapter == null:
+		return "v1 效果适配器未初始化。"
+	var errors: Array = pve_effect_adapter.get_validation_errors(card)
+	if not errors.is_empty():
+		return "v1 效果数据不合法：%s" % str(errors)
+	var unsupported: Array = pve_effect_adapter.get_unsupported_effect_types(card)
+	if not unsupported.is_empty():
+		return "暂未支持该 v1 效果：%s" % str(unsupported)
+	var has_damage: bool = not pve_effect_adapter.get_effects_by_type(card, "deal_damage").is_empty()
+	if has_damage and target_mode != "enemy":
+		return "道法牌需要选择敌人目标。"
+	var has_self_effect: bool = _v1_has_non_damage_effect(card)
+	if target_mode == "enemy" and not has_damage:
+		return "该牌不需要选择敌人目标。"
+	if target_mode == "self" and not has_self_effect and not _v1_has_summon_effect(card):
+		return "该牌需要选择敌人目标。"
+	if _v1_has_summon_effect(card):
+		var slot_index := _find_play_slot(game_state.active_player_index, CardTypes.CHENGDAO)
+		if slot_index < 0:
+			return _central_limit_reason(CardTypes.CHENGDAO)
+	return ""
+
+
+func _v1_has_non_damage_effect(card: Dictionary) -> bool:
+	for effect in pve_effect_adapter.get_effects(card):
+		if typeof(effect) == TYPE_DICTIONARY and str(effect.get("type", "")) in ["gain_formation", "draw", "gain_daoxi", "gain_reflux", "reduce_reflux"]:
+			return true
+	return false
+
+
+func _v1_has_summon_effect(card: Dictionary) -> bool:
+	if pve_effect_adapter == null:
+		return false
+	return not pve_effect_adapter.get_summon_spec(card).is_empty()
+
+
+func _resolve_v1_summon(player: PlayerState, card: Dictionary) -> bool:
+	var board_index := game_state.active_player_index
+	var slot_index := _find_play_slot(board_index, CardTypes.CHENGDAO)
+	if slot_index < 0:
+		_log(_central_limit_reason(CardTypes.CHENGDAO))
+		return false
+	var card_to_place := _prepare_chengdao_beast_card(card.duplicate(true))
+	player_boards[board_index].place_card(CardTypes.CHENGDAO, slot_index, card_to_place)
+	Breakthrough.add_dao_progress(player, 20)
+	_log("【%s】召唤承道兽：攻 %d / 命源 %d。" % [
+		str(card_to_place.get("name", card.get("name", "承道兽"))),
+		int(card_to_place.get("attack_value", 0)),
+		int(card_to_place.get("max_life", 0))
+	])
+	return true
+
+
 func _play_daofa(player: PlayerState, target: PlayerState, slot_type: String, index: int) -> void:
 	var unavailable_reason := _get_unavailable_reason(selected_card, player)
 	if unavailable_reason != "":
@@ -1396,6 +1595,9 @@ func _play_daofa(player: PlayerState, target: PlayerState, slot_type: String, in
 
 
 func _play_daofa_against_enemy(player: PlayerState) -> void:
+	if _is_pve_v1_card(selected_card):
+		_play_v1_selected_card(player, "enemy")
+		return
 	var unavailable_reason := _get_unavailable_reason(selected_card, player)
 	if unavailable_reason != "":
 		_show_failure(unavailable_reason)
@@ -1456,12 +1658,22 @@ func _apply_simple_enter_effect(player: PlayerState, card: Dictionary) -> void:
 
 
 func _card_formation_gain(card: Dictionary) -> int:
+	if _is_pve_v1_card(card) and pve_effect_adapter != null:
+		return pve_effect_adapter.get_total_value(card, "gain_formation")
 	if card.has("formation_gain"):
 		return maxi(0, int(card.get("formation_gain", 0)))
 	var text := "%s %s" % [str(card.get("text", "")), str(card.get("effect_text", ""))]
 	if text.find("获得 1 阵势") >= 0 or text.find("获得 1 点阵势") >= 0:
 		return 1
 	return 0
+
+
+func _card_effect_text(card: Dictionary) -> String:
+	for field in ["text", "effect_text", "description"]:
+		var value := str(card.get(field, ""))
+		if value != "":
+			return value
+	return ""
 
 
 func _on_basic_attack_pressed() -> void:
@@ -2027,6 +2239,9 @@ func _on_enemy_target_pressed() -> void:
 		return
 	var player := game_state.get_active_player()
 	if not selected_card.is_empty():
+		if _is_pve_v1_card(selected_card):
+			_play_v1_selected_card(player, "enemy")
+			return
 		if str(selected_card.get("type", "")) == CardTypes.DAOFA:
 			_play_daofa_against_enemy(player)
 			return
@@ -2278,6 +2493,15 @@ func _get_unavailable_reasons(cards: Array, player: PlayerState) -> Dictionary:
 
 
 func _get_unavailable_reason(card: Dictionary, player: PlayerState) -> String:
+	if _is_pve_v1_card(card):
+		if pve_effect_adapter == null:
+			return "v1 效果适配器未初始化。"
+		var errors: Array = pve_effect_adapter.get_validation_errors(card)
+		if not errors.is_empty():
+			return "v1 效果数据不合法：%s" % str(errors)
+		var unsupported: Array = pve_effect_adapter.get_unsupported_effect_types(card)
+		if not unsupported.is_empty():
+			return "暂未支持该 v1 效果：%s" % str(unsupported)
 	var realm_requirement := _card_realm_requirement(card)
 	if player.combat_realm < realm_requirement:
 		return "境界不足：需要 %s，当前 %s。" % [
@@ -2389,7 +2613,7 @@ func _update_selected_detail() -> void:
 		int(selected_card.get("cost", 0)),
 		dao_text,
 		_slot_display_name(_expected_slot_for_card(str(selected_card.get("type", "")))),
-		str(selected_card.get("text", "")),
+		_card_effect_text(selected_card),
 		unavailable_line
 	]
 
@@ -2453,6 +2677,22 @@ func _pay_card_cost(player: PlayerState, card: Dictionary) -> void:
 
 
 func _prepare_chengdao_beast_card(card: Dictionary) -> Dictionary:
+	if _is_pve_v1_card(card) and pve_effect_adapter != null:
+		var summon_spec: Dictionary = pve_effect_adapter.get_summon_spec(card)
+		if not summon_spec.is_empty():
+			card["type"] = CardTypes.CHENGDAO
+			card["summon_id"] = str(summon_spec.get("summon_id", card.get("id", "")))
+			card["attack_value"] = int(summon_spec.get("attack", 0))
+			card["attack"] = int(summon_spec.get("attack", 0))
+			card["current_life"] = int(summon_spec.get("life", 1))
+			card["max_life"] = int(summon_spec.get("life", 1))
+			card["life"] = int(summon_spec.get("life", 1))
+			card["side"] = str(summon_spec.get("side", "neutral"))
+			card["chengdao_kind"] = str(summon_spec.get("chengdao_kind", ""))
+			card["death_destination"] = str(summon_spec.get("death_destination", "discard"))
+			card["is_special"] = bool(summon_spec.get("is_special", false))
+			card["dao_tags"] = summon_spec.get("dao_tags", []).duplicate(true)
+			return card
 	if not card.has("attack") and not card.has("power") and not card.has("offense"):
 		push_warning("%s 缺少 attack / power / offense，使用默认攻伐 10。" % str(card.get("name", "承道兽")))
 		card["attack_value"] = 10
@@ -2588,13 +2828,28 @@ func _refresh_turn_resources(player: PlayerState) -> void:
 
 func _add_return_tide(player: PlayerState, amount: int) -> void:
 	var stats: Dictionary = extra_stats.get(player.id, {"dao_breath": 0, "return_tide": 0})
-	stats["return_tide"] = int(stats.get("return_tide", 0)) + amount
+	stats["return_tide"] = maxi(0, int(stats.get("return_tide", 0)) + amount)
 	extra_stats[player.id] = stats
+	_sync_run_state_resources(player)
 
 
 func _get_return_tide(player: PlayerState) -> int:
 	var stats: Dictionary = extra_stats.get(player.id, {"dao_breath": 0, "return_tide": 0})
 	return int(stats.get("return_tide", 0))
+
+
+func _sync_run_state_resources(player: PlayerState) -> void:
+	if game_mode != "pve" or player == null or player.id != "p1":
+		return
+	var run_state = RunStateScript.get_current()
+	if run_state == null or not bool(run_state.run_started):
+		return
+	var stats: Dictionary = extra_stats.get(player.id, {"dao_breath": 0, "return_tide": 0})
+	run_state.current_life = int(player.life_source)
+	run_state.current_daoxi = int(stats.get("dao_breath", 0))
+	run_state.formation = int(player.formation_value)
+	run_state.reflux = int(stats.get("return_tide", 0))
+	run_state.daoxing = int(player.dao_progress)
 
 
 func _is_artifact_eligible(player: PlayerState, card: Dictionary) -> bool:

@@ -21,6 +21,9 @@ var current_deck: Array = []
 var draw_pile: Array = []
 var discard_pile: Array = []
 var exhaust_pile: Array = []
+var card_data_version := "legacy"
+var starter_deck_path := ""
+var uses_pve_card_v1 := false
 var relics: Array = []
 var weapons: Array = []
 var current_floor := 1
@@ -59,6 +62,9 @@ func start_new(daomaster: Dictionary, starter_cards: Array) -> void:
 	draw_pile = current_deck.duplicate(true)
 	discard_pile.clear()
 	exhaust_pile.clear()
+	card_data_version = "legacy"
+	starter_deck_path = ""
+	uses_pve_card_v1 = false
 	relics.clear()
 	weapons.clear()
 	current_floor = 1
@@ -67,8 +73,16 @@ func start_new(daomaster: Dictionary, starter_cards: Array) -> void:
 	run_over = false
 
 
+func enable_pve_card_v1(deck_path: String, deck_card_ids: Array) -> void:
+	card_data_version = "pve_v1"
+	starter_deck_path = deck_path
+	uses_pve_card_v1 = true
+	current_deck = deck_card_ids.duplicate(true)
+	draw_pile = current_deck.duplicate(true)
+
+
 func debug_summary() -> String:
-	return "RunState: %s / %s | passive %s / %s | life %d/%d | daoxi %d/%d | formation %d | reflux %d | daoxing %d | deck %d | floor %d node %d | started %s over %s" % [
+	return "RunState: %s / %s | passive %s / %s | life %d/%d | daoxi %d/%d | formation %d | reflux %d | daoxing %d | deck %d | card_data %s | v1 %s | floor %d node %d | started %s over %s" % [
 		selected_daomaster_title,
 		selected_daomaster_name,
 		selected_passive_id,
@@ -81,6 +95,8 @@ func debug_summary() -> String:
 		reflux,
 		daoxing,
 		current_deck.size(),
+		card_data_version,
+		str(uses_pve_card_v1),
 		current_floor,
 		current_node,
 		str(run_started),
