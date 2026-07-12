@@ -96,6 +96,8 @@ func validate_summon(current_beasts: Array, metadata: Dictionary) -> Dictionary:
 
 	var used_capacity := get_used_capacity(current_beasts)
 	var required_capacity := get_board_cost(metadata)
+	if rank == RANK_ADVANCED and get_advanced_count(current_beasts) >= MAX_ADVANCED_BEASTS:
+		return {"ok": false, "reason": "无法召唤：场上同时最多存在 1 只高阶承道兽。"}
 	if used_capacity + required_capacity > MAX_BOARD_CAPACITY:
 		return {
 			"ok": false,
@@ -103,8 +105,6 @@ func validate_summon(current_beasts: Array, metadata: Dictionary) -> Dictionary:
 			"used_capacity": used_capacity,
 			"required_capacity": required_capacity
 		}
-	if rank == RANK_ADVANCED and get_advanced_count(current_beasts) >= MAX_ADVANCED_BEASTS:
-		return {"ok": false, "reason": "无法召唤：进阶承道兽最多存在 1 只。"}
 	return {
 		"ok": true,
 		"reason": "",
@@ -114,9 +114,11 @@ func validate_summon(current_beasts: Array, metadata: Dictionary) -> Dictionary:
 	}
 
 
-func register_source_card(beast_instance_id: String, source_card: Dictionary) -> Dictionary:
+func validate_source_registration(beast_instance_id: String, source_card: Dictionary) -> Dictionary:
 	if beast_instance_id == "":
 		return {"ok": false, "reason": "缺少承道兽实例 id。"}
+	if active_beast_card_instances.has(beast_instance_id):
+		return {"ok": false, "reason": "承道兽实例 id 已登记。"}
 	if source_card.is_empty():
 		return {"ok": false, "reason": "缺少来源卡。"}
 	var source_instance_id := str(source_card.get("instance_id", ""))
@@ -125,6 +127,13 @@ func register_source_card(beast_instance_id: String, source_card: Dictionary) ->
 	for active_card in active_beast_card_instances.values():
 		if typeof(active_card) == TYPE_DICTIONARY and str((active_card as Dictionary).get("instance_id", "")) == source_instance_id:
 			return {"ok": false, "reason": "来源卡已登记为场上承道兽。"}
+	return {"ok": true, "reason": ""}
+
+
+func register_source_card(beast_instance_id: String, source_card: Dictionary) -> Dictionary:
+	var validation := validate_source_registration(beast_instance_id, source_card)
+	if not bool(validation.get("ok", false)):
+		return validation
 	active_beast_card_instances[beast_instance_id] = source_card
 	return {"ok": true, "reason": ""}
 

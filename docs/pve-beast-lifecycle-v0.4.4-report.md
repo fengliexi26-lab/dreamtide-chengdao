@@ -167,3 +167,92 @@ Godot headless 退出时仍可能输出 RID/ObjectDB cleanup noise；测试退�
 - 脉冲、燃烧、道主技能。
 - guardian 拦截。
 - 跨波次保留。
+
+## v0.4.4.1 稳定性补充
+
+本次补充修复了召唤事务边界，并扩展自动化测试覆盖。
+
+### 召唤 preflight 与异常回滚
+
+- v1 手牌在扣费前通过 `_get_selected_hand_entry()` 使用 `is_same()` 定位真实手牌对象和索引。
+- 如果选中牌已不在手牌中，直接失败，不扣费、不执行效果、不移动牌、不登记 registry。
+- 承道兽召唤在扣费前构建 summon plan。
+- summon plan 包含：
+  - `source_card`
+  - `source_hand_index`
+  - `summon_spec`
+  - `metadata`
+  - `beast_instance_id`
+  - `slot_index`
+  - `board_index`
+- 当前阶段拒绝单牌多次 summon effect，返回“v0.4.4 暂不支持单牌多次召唤”。
+- source registry 在执行 effects 前完成预登记；登记失败时恢复手牌和扣费前道息。
+- summon commit 阶段只使用 plan 中预先生成的 metadata 和 beast_instance_id，不再重新生成。
+
+### Source registry 预检
+
+`PveBeastRuntime` 新增 `validate_source_registration()`，并且 `register_source_card()` 自身也重复执行同一套检查。
+
+检查内容：
+
+- `beast_instance_id` 非空。
+- 同名 `beast_instance_id` 未登记。
+- `source_card` 非空。
+- `source_card.instance_id` 非空。
+- 同一 `source_card.instance_id` 未被其他承道兽登记。
+
+### Advanced 检查顺序
+
+`validate_summon()` 已调整为：
+
+1. rank 与 source 校验。
+2. 高阶承道兽数量校验。
+3. 总占位容量校验。
+
+因此第二只 `advanced` 会优先返回“场上同时最多存在 1 只高阶承道兽”，不会被容量不足覆盖。
+
+### 死亡一致性
+
+`_resolve_pve_beast_defeat()` 现在校验：
+
+```text
+beast_data.source_card_instance_id == source_card.instance_id
+```
+
+- 找不到 registry 来源卡时 `push_error`，并记录 beast_instance_id、expected source、rank。
+- source id 不一致时 `push_error`，并记录 beast_instance_id、expected source、actual source、rank。
+- 不再伪造归堆卡。
+- 不把战场 beast unit 当作来源卡归堆。
+- 一致性失败时不触发承道兽死亡通知。
+
+### 新增测试覆盖
+
+`TestPveBeastLifecycle.gd` 增加：
+
+- 通过 `is_same()` 验证 ordinary 死亡归堆返回原始 source card 对象。
+- 验证战场 beast 是轻量对象，不包含 `effects/runtime_state/summon_data/implementation_phase`。
+- 验证 registry 保存的是原手牌对象，战场 beast 不是源卡对象。
+- 三只 ordinary 成功，第四只 ordinary 事务失败且不扣道息、不移牌、不新增 registry。
+- 第二只 advanced 返回 advanced 专属限制原因。
+- token 强制 `board_cost = 1`，满容量时 token 失败且不改 registry。
+- 重复 source instance 和重复 beast_instance_id 登记失败，registry 数量保持不变。
+- duplicate source preflight 失败时不扣道息、不移手牌、不执行效果、不生成战场兽。
+- 真实 12 张 starter deck 在战斗开始、召唤、死亡、洗弃牌堆后总数保持 12。
+- 同一槽位死亡处理不会重复通知、重复归堆或重复释放 registry。
+- restart 后 registry 清空、旧战场兽清空、新牌组总数为 12、新卡实例与旧 source card 对象隔离。
+
+### 测试结果
+
+以下测试在 v0.4.4.1 后通过，退出码均为 0：
+
+- `tools/ValidatePveData.ps1`
+- `tools/ValidatePveCardV1.ps1`
+- `tools/RunPveCardV1LoaderTests.ps1`
+- `tools/RunPveCardV1BattleIntegrationTests.ps1`
+- `tools/RunPveBeastLifecycleTests.ps1`
+- `tools/RunBattleSceneBoot.ps1`
+- `TestDaoMasterRunStateBoot.tscn`
+- `TestPveTurnFlow.tscn`
+- `TestDaomasterPassives.tscn`
+
+Godot headless 的 RID/ObjectDB cleanup noise 仍视为非阻塞退出噪声。
