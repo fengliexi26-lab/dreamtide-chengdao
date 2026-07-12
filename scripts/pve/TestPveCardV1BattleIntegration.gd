@@ -194,6 +194,8 @@ func _test_v1_summon(scene: Node) -> bool:
 		return _fail_bool("summon card should leave hand")
 	if scene.get("discard_pile").size() != 0 or scene.get("exhaust_pile").size() != 0:
 		return _fail_bool("v1 summon card body should not immediately enter discard/exhaust pile")
+	if scene.get("pve_beast_runtime") == null or scene.get("pve_beast_runtime").get_active_source_count() != 1:
+		return _fail_bool("v1 summon source card should be registered while beast is on battlefield")
 	return true
 
 
@@ -219,6 +221,8 @@ func _reset_for_card_test(scene: Node, player) -> void:
 	scene.get("draw_pile").clear()
 	scene.get("discard_pile").clear()
 	scene.get("exhaust_pile").clear()
+	if scene.get("pve_beast_runtime") != null:
+		scene.get("pve_beast_runtime").reset()
 	scene.set("selected_card", {})
 	scene.set("selected_card_source", "")
 	scene.set("selected_attacker", {"player_index": -1, "slot_index": -1})
