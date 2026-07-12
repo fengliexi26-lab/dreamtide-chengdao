@@ -103,6 +103,25 @@ func get_card(slot_type: String, index: int) -> Dictionary:
 	return placed_cards.get(_key(slot_type, index), {})
 
 
+func get_cards_in_slots(slot_type: String) -> Array:
+	var cards: Array = []
+	for i in range(_slot_count_for_type(slot_type)):
+		var card: Dictionary = placed_cards.get(_key(slot_type, i), {})
+		if not card.is_empty():
+			cards.append(card.duplicate(true))
+	return cards
+
+
+func update_card(slot_type: String, index: int, card: Dictionary) -> void:
+	var key := _key(slot_type, index)
+	if card.is_empty() or not placed_cards.has(key):
+		return
+	placed_cards[key] = card
+	var button := slot_buttons.get(key) as Button
+	if button != null:
+		button.text = _format_slot_text(slot_type, card)
+
+
 func damage_card(slot_type: String, index: int, amount: int) -> Dictionary:
 	var key := _key(slot_type, index)
 	var card: Dictionary = placed_cards.get(key, {})
@@ -139,22 +158,32 @@ func set_card_attacked(slot_type: String, index: int, has_attacked: bool) -> voi
 	if card.is_empty():
 		return
 	card["has_attacked"] = has_attacked
+	card["has_acted"] = has_attacked
+	card["action_points_remaining"] = 0 if has_attacked else int(card.get("action_points", 1))
 	placed_cards[key] = card
 	var button := slot_buttons.get(key) as Button
 	if button != null:
 		button.text = _format_slot_text(slot_type, card)
 
 
-func clear_attack_flags() -> void:
+func reset_beast_actions() -> void:
 	for key in placed_cards.keys():
 		var card: Dictionary = placed_cards[key]
 		if str(card.get("type", "")) == CardTypes.CHENGDAO:
+			var action_points := maxi(1, int(card.get("action_points", 1)))
+			card["action_points"] = action_points
+			card["action_points_remaining"] = action_points
 			card["has_attacked"] = false
+			card["has_acted"] = false
 			placed_cards[key] = card
 			var parts := str(key).split(":")
 			var button := slot_buttons.get(key) as Button
 			if button != null:
 				button.text = _format_slot_text(str(parts[0]), card)
+
+
+func clear_attack_flags() -> void:
+	reset_beast_actions()
 
 
 func highlight_slots(slot_type: String, only_empty: bool = true, clear_first: bool = true) -> void:
@@ -237,6 +266,13 @@ func _apply_default_style(button: Button) -> void:
 
 func _key(slot_type: String, index: int) -> String:
 	return "%s:%d" % [slot_type, index]
+
+
+func _slot_count_for_type(slot_type: String) -> int:
+	for row in SLOT_LAYOUT:
+		if str(row.get("type", "")) == slot_type:
+			return int(row.get("count", 0))
+	return 0
 
 
 func _on_slot_pressed(slot_type: String, index: int) -> void:

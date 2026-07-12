@@ -8,6 +8,7 @@ const RunStateScript = preload("res://scripts/pve/RunState.gd")
 const PassiveRuntimeScript = preload("res://scripts/pve/DaomasterPassiveRuntime.gd")
 const PveCardV1CatalogScript = preload("res://scripts/pve/PveCardV1Catalog.gd")
 const PveCardEffectAdapterScript = preload("res://scripts/pve/PveCardEffectAdapter.gd")
+const PveBeastRuntimeScript = preload("res://scripts/pve/PveBeastRuntime.gd")
 const MAIN_DECK_SIZE := 40
 const SIDE_DECK_SIZE := 15
 const HAND_LIMIT := 10
@@ -65,6 +66,7 @@ var exhaust_pile: Array[Dictionary] = []
 var passive_runtime
 var pve_card_catalog
 var pve_effect_adapter
+var pve_beast_runtime
 var pve_card_data_mode := "legacy_fallback"
 var pve_card_fallback_reason := ""
 var extra_stats := {}
@@ -574,6 +576,8 @@ func _start_pve_battle() -> void:
 
 	pve_card_catalog = null
 	pve_effect_adapter = PveCardEffectAdapterScript.new()
+	pve_beast_runtime = PveBeastRuntimeScript.new()
+	pve_beast_runtime.reset()
 	pve_card_data_mode = "legacy_fallback"
 	pve_card_fallback_reason = ""
 	var run_state = RunStateScript.get_current()
@@ -699,6 +703,8 @@ func _build_v1_pve_deck(run_state) -> Dictionary:
 
 
 func _start_pve_battle_load_error(reason: String, run_state) -> void:
+	pve_beast_runtime = PveBeastRuntimeScript.new()
+	pve_beast_runtime.reset()
 	pve_card_data_mode = "pve_v1_error"
 	card_load_error = reason
 	push_error("[BattleScene] %s" % reason)
@@ -964,6 +970,8 @@ func _setup_pve_piles_from_deck(deck: Array[Dictionary]) -> void:
 	draw_pile.clear()
 	discard_pile.clear()
 	exhaust_pile.clear()
+	if pve_beast_runtime != null:
+		pve_beast_runtime.reset()
 	for card in deck:
 		draw_pile.append(card.duplicate(true))
 	draw_pile.shuffle()
@@ -1449,23 +1457,43 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 	if selected_card.is_empty():
 		_show_failure("请先选择手牌。")
 		return
-	var card := selected_card.duplicate(true)
+	var hand_entry := _get_selected_hand_entry(player)
+	if not bool(hand_entry.get("ok", false)):
+		_show_failure(str(hand_entry.get("reason", "该牌已不在手牌中。")))
+		_refresh_all()
+		return
+	var card: Dictionary = hand_entry.get("card", {})
 	var unavailable_reason := _get_unavailable_reason(card, player)
 	if unavailable_reason != "":
 		_show_failure(unavailable_reason)
 		return
-	var validation_reason := _validate_v1_target_and_capacity(card, target_mode)
+	var summon_plan := _build_v1_summon_plan(player, card, target_mode, int(hand_entry.get("index", -1)))
+	var validation_reason := _validate_v1_target_and_capacity(card, target_mode, summon_plan)
 	if validation_reason != "":
 		_show_failure(validation_reason)
 		return
 	var card_name := str(card.get("name", "未知卡牌"))
+	var before_daoxi: int = _get_current_daoxi(player)
 	_pay_card_cost(player, card)
-	_remove_selected_from_source(player)
-	Breakthrough.add_dao_progress(player, 5)
+	var resolved_card := _remove_hand_card_at(player, int(hand_entry.get("index", -1)), card)
+	if resolved_card.is_empty():
+		_set_current_daoxi(player, before_daoxi)
+		_show_failure("该牌已不在手牌中。")
+		_refresh_all()
+		return
+	if not summon_plan.is_empty():
+		var register_result: Dictionary = pve_beast_runtime.register_source_card(str(summon_plan.get("beast_instance_id", "")), resolved_card)
+		if not bool(register_result.get("ok", false)):
+			_set_current_daoxi(player, before_daoxi)
+			_restore_card_to_hand(player, int(hand_entry.get("index", -1)), resolved_card)
+			push_error("[BattleScene] summon source registration failed: %s" % str(register_result.get("reason", "")))
+			_show_failure(str(register_result.get("reason", "承道兽来源登记失败。")))
+			_refresh_all()
+			return
 	_log("%s打出了【%s】。" % [player.display_name, card_name])
 
 	var put_into_resolved_pile := true
-	var effects: Array = pve_effect_adapter.get_effects(card)
+	var effects: Array = pve_effect_adapter.get_effects(resolved_card)
 	for effect in effects:
 		if typeof(effect) != TYPE_DICTIONARY:
 			continue
@@ -1491,16 +1519,19 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 				_add_return_tide(player, -value)
 				_log("【%s】回潮值 -%d，当前回潮值 %d。" % [card_name, value, _get_return_tide(player)])
 			"summon":
-				_resolve_v1_summon(player, card)
+				if not _commit_v1_summon_plan(summon_plan):
+					_handle_v1_summon_internal_failure(player, before_daoxi, int(hand_entry.get("index", -1)), resolved_card, summon_plan)
+					return
 				put_into_resolved_pile = false
 	if put_into_resolved_pile:
-		_put_card_into_pve_resolved_pile(card)
+		_put_card_into_pve_resolved_pile(resolved_card)
+	Breakthrough.add_dao_progress(player, 5)
 	_clear_selection()
 	_refresh_all()
 	_check_game_over()
 
 
-func _validate_v1_target_and_capacity(card: Dictionary, target_mode: String) -> String:
+func _validate_v1_target_and_capacity(card: Dictionary, target_mode: String, summon_plan: Dictionary = {}) -> String:
 	if pve_effect_adapter == null:
 		return "v1 效果适配器未初始化。"
 	var errors: Array = pve_effect_adapter.get_validation_errors(card)
@@ -1518,9 +1549,10 @@ func _validate_v1_target_and_capacity(card: Dictionary, target_mode: String) -> 
 	if target_mode == "self" and not has_self_effect and not _v1_has_summon_effect(card):
 		return "该牌需要选择敌人目标。"
 	if _v1_has_summon_effect(card):
-		var slot_index := _find_play_slot(game_state.active_player_index, CardTypes.CHENGDAO)
-		if slot_index < 0:
-			return _central_limit_reason(CardTypes.CHENGDAO)
+		if summon_plan.is_empty():
+			return "v0.4.4 暂不支持单牌多次召唤。"
+		if not bool(summon_plan.get("ok", false)):
+			return str(summon_plan.get("reason", "无法召唤承道兽。"))
 	return ""
 
 
@@ -1537,21 +1569,103 @@ func _v1_has_summon_effect(card: Dictionary) -> bool:
 	return not pve_effect_adapter.get_summon_spec(card).is_empty()
 
 
-func _resolve_v1_summon(player: PlayerState, card: Dictionary) -> bool:
+func _validate_pve_v1_beast_summon(card: Dictionary, overrides: Dictionary = {}) -> Dictionary:
+	if pve_beast_runtime == null:
+		return {"ok": false, "reason": "承道兽运行时未初始化。"}
+	var summon_spec: Dictionary = pve_effect_adapter.get_summon_spec(card)
+	if summon_spec.is_empty():
+		return {"ok": false, "reason": "该牌没有召唤数据。"}
+	var metadata: Dictionary = pve_beast_runtime.normalize_beast_metadata(card, summon_spec, overrides)
+	var board_index := game_state.active_player_index
+	return pve_beast_runtime.validate_summon(player_boards[board_index].get_cards_in_slots(CardTypes.CHENGDAO), metadata)
+
+
+func _build_v1_summon_plan(player: PlayerState, card: Dictionary, target_mode: String, hand_index: int) -> Dictionary:
+	if not _v1_has_summon_effect(card):
+		return {}
+	if pve_beast_runtime == null:
+		return {"ok": false, "reason": "承道兽运行时未初始化。"}
+	var summon_effects: Array = pve_effect_adapter.get_effects_by_type(card, "summon")
+	if summon_effects.size() > 1:
+		return {"ok": false, "reason": "v0.4.4 暂不支持单牌多次召唤。"}
+	if target_mode != "self":
+		return {"ok": false, "reason": "该牌不需要选择敌人目标。"}
+	var summon_spec: Dictionary = pve_effect_adapter.get_summon_spec(card)
+	if summon_spec.is_empty():
+		return {"ok": false, "reason": "该牌没有召唤数据。"}
+	var metadata: Dictionary = pve_beast_runtime.normalize_beast_metadata(card, summon_spec)
 	var board_index := game_state.active_player_index
 	var slot_index := _find_play_slot(board_index, CardTypes.CHENGDAO)
 	if slot_index < 0:
-		_log(_central_limit_reason(CardTypes.CHENGDAO))
+		return {"ok": false, "reason": _central_limit_reason(CardTypes.CHENGDAO)}
+	var summon_check: Dictionary = pve_beast_runtime.validate_summon(player_boards[board_index].get_cards_in_slots(CardTypes.CHENGDAO), metadata)
+	if not bool(summon_check.get("ok", false)):
+		return summon_check
+	var beast_instance_id: String = pve_beast_runtime.create_beast_instance_id()
+	metadata["beast_instance_id"] = beast_instance_id
+	if not bool(metadata.get("is_token", false)):
+		var source_check: Dictionary = pve_beast_runtime.validate_source_registration(beast_instance_id, card)
+		if not bool(source_check.get("ok", false)):
+			return source_check
+	return {
+		"ok": true,
+		"reason": "",
+		"source_card": card,
+		"source_hand_index": hand_index,
+		"summon_spec": summon_spec,
+		"metadata": metadata,
+		"beast_instance_id": beast_instance_id,
+		"slot_index": slot_index,
+		"board_index": board_index
+	}
+
+
+func _beast_rank_display(rank: String) -> String:
+	match rank:
+		"advanced":
+			return "高阶"
+		"token":
+			return "衍生"
+		"unique":
+			return "唯一"
+		_:
+			return "普通"
+
+
+func _commit_v1_summon_plan(plan: Dictionary) -> bool:
+	if plan.is_empty() or not bool(plan.get("ok", false)):
 		return false
-	var card_to_place := _prepare_chengdao_beast_card(card.duplicate(true))
+	var board_index := int(plan.get("board_index", -1))
+	var slot_index := int(plan.get("slot_index", -1))
+	var card_to_place: Dictionary = plan.get("metadata", {})
+	if board_index < 0 or board_index >= player_boards.size() or slot_index < 0:
+		push_error("[BattleScene] invalid summon plan board/slot.")
+		return false
+	if not player_boards[board_index].is_slot_empty(CardTypes.CHENGDAO, slot_index):
+		push_error("[BattleScene] summon plan slot is no longer empty.")
+		return false
 	player_boards[board_index].place_card(CardTypes.CHENGDAO, slot_index, card_to_place)
-	Breakthrough.add_dao_progress(player, 20)
-	_log("【%s】召唤承道兽：攻 %d / 命源 %d。" % [
-		str(card_to_place.get("name", card.get("name", "承道兽"))),
+	Breakthrough.add_dao_progress(game_state.players[board_index], 20)
+	_log("【%s】召唤%s承道兽：占位 %d，攻 %d / 命源 %d。" % [
+		str(card_to_place.get("name", "承道兽")),
+		_beast_rank_display(str(card_to_place.get("beast_rank", "ordinary"))),
+		int(card_to_place.get("board_cost", 1)),
 		int(card_to_place.get("attack_value", 0)),
 		int(card_to_place.get("max_life", 0))
 	])
 	return true
+
+
+func _handle_v1_summon_internal_failure(player: PlayerState, before_daoxi: int, hand_index: int, source_card: Dictionary, plan: Dictionary) -> void:
+	push_error("[BattleScene] internal summon failure, rolling back source card.")
+	var beast_instance_id := str(plan.get("beast_instance_id", ""))
+	if pve_beast_runtime != null and beast_instance_id != "":
+		pve_beast_runtime.release_source_card(beast_instance_id)
+	_restore_card_to_hand(player, hand_index, source_card)
+	_set_current_daoxi(player, before_daoxi)
+	_show_failure("召唤承道兽内部失败，已回滚手牌与费用。")
+	_clear_selection()
+	_refresh_all()
 
 
 func _play_daofa(player: PlayerState, target: PlayerState, slot_type: String, index: int) -> void:
@@ -1810,7 +1924,7 @@ func _start_pve_player_turn(player: PlayerState, is_first_turn: bool = false) ->
 	player.formation_value = 0
 	_restore_pve_daoxi(player)
 	dao_strike_used[player.id] = false
-	player_boards[0].clear_attack_flags()
+	player_boards[0].reset_beast_actions()
 	# PVE turn start order: restore base resources, then passive start rewards, then fixed draw 5.
 	if passive_runtime != null:
 		passive_runtime.on_player_turn_start()
@@ -1879,6 +1993,9 @@ func _find_play_slot(board_index: int, slot_type: String) -> int:
 
 func _central_limit_reason(slot_type: String) -> String:
 	if slot_type == CardTypes.CHENGDAO:
+		if game_mode == "pve" and pve_beast_runtime != null:
+			var used_capacity: int = pve_beast_runtime.get_used_capacity(player_boards[game_state.active_player_index].get_cards_in_slots(CardTypes.CHENGDAO))
+			return "无法打出：己方承道兽占位已达上限 %d / %d。" % [used_capacity, PveBeastRuntimeScript.MAX_BOARD_CAPACITY]
 		return "无法打出：己方承道兽数量已达上限 3。"
 	if slot_type == CardTypes.FORMATION:
 		return "无法打出：己方法阵已存在。"
@@ -1912,12 +2029,51 @@ func _discard_selected_if_needed(player: PlayerState, result: Dictionary) -> voi
 		_remove_selected_from_source(player)
 
 
-func _remove_selected_from_source(player: PlayerState) -> void:
+func _get_selected_hand_entry(player: PlayerState) -> Dictionary:
+	if selected_card_source != "hand":
+		return {"ok": false, "index": -1, "card": {}, "reason": "该牌已不在手牌中。"}
+	for i in range(player.hand.size()):
+		if is_same(player.hand[i], selected_card):
+			return {"ok": true, "index": i, "card": player.hand[i], "reason": ""}
+	return {"ok": false, "index": -1, "card": {}, "reason": "该牌已不在手牌中。"}
+
+
+func _remove_hand_card_at(player: PlayerState, index: int, expected_card: Dictionary) -> Dictionary:
+	if index < 0 or index >= player.hand.size():
+		return {}
+	if not is_same(player.hand[index], expected_card):
+		return {}
+	var removed: Dictionary = player.hand[index]
+	player.hand.remove_at(index)
+	return removed
+
+
+func _restore_card_to_hand(player: PlayerState, index: int, card: Dictionary) -> void:
+	if card.is_empty():
+		return
+	var safe_index := clampi(index, 0, player.hand.size())
+	player.hand.insert(safe_index, card)
+
+
+func _set_current_daoxi(player: PlayerState, value: int) -> void:
+	var stats: Dictionary = extra_stats.get(player.id, {"dao_breath": 0, "return_tide": 0})
+	stats["dao_breath"] = maxi(0, value)
+	extra_stats[player.id] = stats
+
+
+func _get_current_daoxi(player: PlayerState) -> int:
+	var stats: Dictionary = extra_stats.get(player.id, {"dao_breath": 0, "return_tide": 0})
+	return int(stats.get("dao_breath", 0))
+
+
+func _remove_selected_from_source(player: PlayerState) -> Dictionary:
 	var source := _cards_for_source(player, selected_card_source)
 	for i in range(source.size()):
 		if source[i] == selected_card:
+			var removed: Dictionary = source[i]
 			source.remove_at(i)
-			return
+			return removed
+	return {}
 
 
 func _cards_for_source(player: PlayerState, source: String) -> Array:
@@ -2077,11 +2233,15 @@ func _refresh_resource_summary(player: PlayerState) -> void:
 	if resource_summary_label == null:
 		return
 	var stats: Dictionary = extra_stats.get(player.id, {"dao_breath": 0, "return_tide": 0})
-	resource_summary_label.text = "资源摘要\n道息：%d\n阵势值：%d\n回潮值：%d\n道行值：%d\n当前回合：%d" % [
+	var board_capacity := 0
+	if game_mode == "pve" and pve_beast_runtime != null:
+		board_capacity = pve_beast_runtime.get_used_capacity(player_boards[0].get_cards_in_slots(CardTypes.CHENGDAO))
+	resource_summary_label.text = "资源摘要\n道息：%d\n阵势值：%d\n回潮值：%d\n道行值：%d\n承道占位：%d / 3\n当前回合：%d" % [
 		int(stats.get("dao_breath", 0)),
 		player.formation_value,
 		int(stats.get("return_tide", 0)),
 		player.dao_progress,
+		board_capacity,
 		game_state.turn_number
 	]
 
@@ -2384,12 +2544,20 @@ func _format_battlefield_card(owner_index: int, slot_type: String, card: Diction
 			dao_tags = dao_tags.substr(0, 8) + "..."
 		lines.append(dao_tags)
 	if slot_type == CardTypes.CHENGDAO:
+		lines.append("%s / 占位 %d" % [
+			_beast_rank_display(str(card.get("beast_rank", "ordinary"))),
+			int(card.get("board_cost", 1))
+		])
 		lines.append("攻 %d / 命 %d" % [
 			int(card.get("attack_value", card.get("attack", card.get("power", card.get("offense", 0))))),
 			int(card.get("current_life", 0))
 		])
+		lines.append("行动 %d/%d" % [
+			int(card.get("action_points_remaining", 1)),
+			int(card.get("action_points", 1))
+		])
 		if bool(card.get("has_attacked", false)):
-			lines.append("已攻击")
+			lines.append("已行动")
 	return _array_text_with_separator(lines, "\n")
 
 
@@ -2708,18 +2876,34 @@ func _prepare_chengdao_beast_card(card: Dictionary) -> Dictionary:
 	return card
 
 
+func _beast_can_act(beast: Dictionary) -> bool:
+	if beast.has("action_points_remaining"):
+		return int(beast.get("action_points_remaining", 0)) > 0
+	return not bool(beast.get("has_attacked", false))
+
+
+func _consume_beast_action(board: BoardView, chengdao_index: int, beast: Dictionary) -> void:
+	var action_points := maxi(1, int(beast.get("action_points", 1)))
+	var remaining := maxi(0, int(beast.get("action_points_remaining", action_points)) - 1)
+	beast["action_points"] = action_points
+	beast["action_points_remaining"] = remaining
+	beast["has_attacked"] = remaining <= 0
+	beast["has_acted"] = remaining <= 0
+	board.update_card(CardTypes.CHENGDAO, chengdao_index, beast)
+
+
 func _basic_attack_with_beast(player: PlayerState, target: PlayerState, chengdao_index: int) -> void:
 	var board := player_boards[game_state.active_player_index]
 	var beast := board.get_card(CardTypes.CHENGDAO, chengdao_index)
 	if beast.is_empty():
 		_show_failure("请选择己方承道兽进行攻击。")
 		return
-	if bool(beast.get("has_attacked", false)):
+	if not _beast_can_act(beast):
 		_show_failure("【%s】本回合已攻击。" % str(beast.get("name", "")))
 		return
 	var damage := int(beast.get("attack_value", beast.get("attack", beast.get("power", beast.get("offense", 10)))))
 	var actual := target.take_damage(damage)
-	board.set_card_attacked(CardTypes.CHENGDAO, chengdao_index, true)
+	_consume_beast_action(board, chengdao_index, beast)
 	_log("【%s】攻击敌方道主，造成 %d 点伤害。" % [str(beast.get("name", "")), actual])
 	_log("伤害修正参考道主【%s】的道脉与侧性。" % _dao_master_name(target))
 	_clear_selection()
@@ -2733,12 +2917,12 @@ func _basic_attack_with_beast_to_enemy(player: PlayerState, chengdao_index: int)
 	if beast.is_empty():
 		_show_failure("请选择己方承道兽进行攻击。")
 		return
-	if bool(beast.get("has_attacked", false)):
+	if not _beast_can_act(beast):
 		_show_failure("【%s】本回合已攻击。" % str(beast.get("name", "")))
 		return
 	var damage := int(beast.get("attack_value", beast.get("attack", beast.get("power", beast.get("offense", 10)))))
 	var actual := _damage_enemy(damage)
-	board.set_card_attacked(CardTypes.CHENGDAO, chengdao_index, true)
+	_consume_beast_action(board, chengdao_index, beast)
 	_log("【%s】攻击%s，造成 %d 点伤害。" % [str(beast.get("name", "")), str(enemy.get("name", "敌人")), actual])
 	_log("伤害修正参考道主【%s】的道脉与侧性。" % _dao_master_name(player))
 	_clear_selection()
@@ -2753,7 +2937,7 @@ func _basic_attack_with_beast_to_beast(player: PlayerState, target: PlayerState,
 	if beast.is_empty():
 		_show_failure("请选择己方承道兽进行攻击。")
 		return
-	if bool(beast.get("has_attacked", false)):
+	if not _beast_can_act(beast):
 		_show_failure("【%s】本回合已攻击。" % str(beast.get("name", "")))
 		return
 	var target_beast := target_board.get_card(CardTypes.CHENGDAO, target_index)
@@ -2762,7 +2946,7 @@ func _basic_attack_with_beast_to_beast(player: PlayerState, target: PlayerState,
 		return
 	var damage := int(beast.get("attack_value", beast.get("attack", beast.get("power", beast.get("offense", 10)))))
 	var damage_result := target_board.damage_card(CardTypes.CHENGDAO, target_index, damage)
-	attacker_board.set_card_attacked(CardTypes.CHENGDAO, attacker_index, true)
+	_consume_beast_action(attacker_board, attacker_index, beast)
 	_log("【%s】攻击敌方承道兽【%s】，造成 %d 点伤害。" % [
 		str(beast.get("name", "")),
 		str(target_beast.get("name", "")),
@@ -2770,14 +2954,69 @@ func _basic_attack_with_beast_to_beast(player: PlayerState, target: PlayerState,
 	])
 	if bool(damage_result.get("defeated", false)):
 		var defeated_card: Dictionary = damage_result.get("card", {})
-		target.discard_pile.append(defeated_card)
-		_notify_chengdao_beast_died(1 - game_state.active_player_index, defeated_card)
+		if game_mode == "pve":
+			_resolve_pve_beast_defeat(1 - game_state.active_player_index, defeated_card)
+		else:
+			target.discard_pile.append(defeated_card)
+			_notify_chengdao_beast_died(1 - game_state.active_player_index, defeated_card)
 		Breakthrough.add_dao_progress(player, 30)
 		_log("【%s】命源归零，进入弃牌区。" % str(defeated_card.get("name", "")))
 	_log("伤害修正参考道主【%s】的道脉与侧性。" % _dao_master_name(target))
 	_clear_selection()
 	_refresh_all()
 	_check_game_over()
+
+
+func _damage_pve_beast(owner_index: int, slot_index: int, amount: int) -> Dictionary:
+	if owner_index < 0 or owner_index >= player_boards.size():
+		return {"ok": false, "defeated": false, "reason": "承道兽归属无效。"}
+	var damage_result := player_boards[owner_index].damage_card(CardTypes.CHENGDAO, slot_index, amount)
+	if bool(damage_result.get("defeated", false)):
+		var defeated_card: Dictionary = damage_result.get("card", {})
+		_resolve_pve_beast_defeat(owner_index, defeated_card)
+	return damage_result
+
+
+func _resolve_pve_beast_defeat(owner_index: int, beast_data: Dictionary) -> void:
+	if beast_data.is_empty():
+		return
+	var beast_name := str(beast_data.get("name", "承道兽"))
+	var rank := str(beast_data.get("beast_rank", "ordinary"))
+	var destination := str(beast_data.get("death_destination", "discard"))
+	var should_notify := false
+	var source_card: Dictionary = {}
+	if pve_beast_runtime != null and not bool(beast_data.get("is_token", false)):
+		source_card = pve_beast_runtime.release_source_card(str(beast_data.get("beast_instance_id", "")))
+	if rank == "token" or bool(beast_data.get("is_token", false)) or destination == "vanish":
+		_log("【%s】命源归零，衍生承道兽消失。" % beast_name)
+		should_notify = true
+	elif source_card.is_empty():
+		var missing_message := "承道兽死亡一致性错误：未找到来源卡。beast_instance_id=%s expected_source=%s rank=%s" % [
+			str(beast_data.get("beast_instance_id", "")),
+			str(beast_data.get("source_card_instance_id", "")),
+			rank
+		]
+		push_error("[BattleScene] %s" % missing_message)
+		_log(missing_message)
+	elif str(source_card.get("instance_id", "")) != str(beast_data.get("source_card_instance_id", "")):
+		var mismatch_message := "承道兽死亡一致性错误：来源卡实例不匹配。beast_instance_id=%s expected_source=%s actual_source=%s rank=%s" % [
+			str(beast_data.get("beast_instance_id", "")),
+			str(beast_data.get("source_card_instance_id", "")),
+			str(source_card.get("instance_id", "")),
+			rank
+		]
+		push_error("[BattleScene] %s" % mismatch_message)
+		_log(mismatch_message)
+	elif destination == "exhaust" or rank == "advanced":
+		exhaust_pile.append(source_card)
+		_log("【%s】命源归零，来源卡【%s】进入消耗堆。" % [beast_name, str(source_card.get("name", beast_name))])
+		should_notify = true
+	else:
+		discard_pile.append(source_card)
+		_log("【%s】命源归零，来源卡【%s】进入弃牌堆。" % [beast_name, str(source_card.get("name", beast_name))])
+		should_notify = true
+	if should_notify:
+		_notify_chengdao_beast_died(owner_index, beast_data)
 
 
 func _notify_chengdao_beast_died(owner_index: int, beast_data: Dictionary) -> void:
@@ -2792,7 +3031,7 @@ func _select_attacker(chengdao_index: int) -> void:
 	if beast.is_empty():
 		_show_failure("请选择己方承道兽进行攻击。")
 		return
-	if bool(beast.get("has_attacked", false)):
+	if not _beast_can_act(beast):
 		_show_failure("【%s】本回合已攻击。" % str(beast.get("name", "")))
 		return
 	selected_card = {}
@@ -2812,7 +3051,7 @@ func _has_selected_attacker() -> bool:
 func _first_ready_chengdao_index(board_index: int) -> int:
 	for i in range(3):
 		var beast := player_boards[board_index].get_card(CardTypes.CHENGDAO, i)
-		if not beast.is_empty() and not bool(beast.get("has_attacked", false)):
+		if not beast.is_empty() and _beast_can_act(beast):
 			return i
 	return -1
 
