@@ -52,7 +52,7 @@
 - 同时最多存在 1 只高阶承道兽。
 - 有主动技能和一个被动或死亡能力。
 - 主动技能消耗本回合兽行。
-- 死亡后默认进入消耗堆。
+- 死亡后进入消耗堆。
 - 需要明确召唤条件，不能只是更大的普通兽。
 
 ### 2.3 token：衍生承道兽
@@ -63,8 +63,11 @@
 
 - 由卡牌、敌人、事件或 Boss 临时生成。
 - 不进入普通牌组。
+- 没有 source card，不登记到 `active_beast_card_instances`。
+- 进入战场的 token 承道兽占用 1 点阵位。
 - 死亡后直接消失。
-- 是否占阵位由生成效果明确声明。
+- 战斗结束后直接消失。
+- 第一版不支持 `board_cost = 0` 的 token。
 
 ### 2.4 unique：唯一承道兽或道主眷兽
 
@@ -86,6 +89,7 @@
 - 总容量：3。
 - 普通兽占 1。
 - 高阶兽占 2。
+- 进入战场的 token 兽占 1。
 - 未来唯一兽可占 3。
 - 同时最多存在一只高阶兽。
 
@@ -106,6 +110,8 @@
 - 容量不足时不得执行任何其他效果。
 - 同一张召唤牌不能因为多次 UI 点击生成两个单位。
 - 高阶兽上场时若已有高阶兽，失败原因必须明确显示。
+- token 不能绕过总阵位容量 3。
+- 不占阵位的临时对象应分类为 `effect`、`projection` 或 `mechanism`，不能使用承道兽生命周期和兽行规则冒充 token 承道兽。
 
 建议字段：
 
@@ -215,14 +221,44 @@
 
 ## 7. 生命周期
 
+### 7.1 单一所有权登记表
+
+冻结 source card 绑定方式：
+
+```text
+active_beast_card_instances:
+    beast_instance_id -> original battle card instance
+```
+
+采用运行时单一所有权登记表。战场单位只保存关联 ID，不保存另一份完整源卡。
+
+战场承道兽运行时字段：
+
+- `beast_instance_id`
+- `source_card_instance_id`
+- `beast_rank`
+- `board_cost`
+- `death_destination`
+
+说明：
+
+- `source_card_instance_id` 是调试和一致性校验字段。
+- `active_beast_card_instances` 才是源卡实例的运行时所有者。
+- token 没有 source card，不登记到该表。
+- 重开战斗时必须清空登记表并生成新的 battle instances。
+
+### 7.2 生命周期
+
 冻结生命周期：
 
 ```text
-手牌
-→ 召唤
-→ 战场单位绑定 source_card_instance_id
-→ 死亡
-→ 根据 death_destination 归堆
+手牌中的原始战斗实例
+→ 从手牌移除
+→ 登记到 active_beast_card_instances
+→ 战场承道兽保存关联 ID
+→ 承道兽死亡
+→ 根据 beast_instance_id 取回同一个源卡实例
+→ 按 death_destination 归堆
 ```
 
 规则：
@@ -232,11 +268,38 @@
 - token 死亡直接消失。
 - 驻场时卡牌实例不得进入抽弃循环。
 - 战斗结束时存活兽在下一场牌组初始化时恢复为卡牌实例。
+- 同一 `instance_id` 不得同时存在于两个区域。
 - 如果 source card 找不到，必须记录错误并使用安全兜底，不得静默复制新牌。
+
+明确禁止：
+
+- 驻场期间源卡进入抽牌堆、弃牌堆或消耗堆。
+- 为战场和牌堆各保留一份完整卡牌副本。
+- 根据名称寻找源卡。
+- 死亡时从 Catalog 重新生成源卡。
+- 同一 `instance_id` 同时存在于两个区域。
+
+### 7.3 死亡去向
+
+第一版硬规则：
+
+- `ordinary -> discard`
+- `advanced -> exhaust`
+- `token -> vanish`
+
+明确：
+
+- 第一版所有高阶承道兽死亡后进入消耗堆。
+- 首版不允许普通卡牌数据把 advanced 的死亡去向改为 discard。
+- 未来特殊规则若需例外，必须通过单独设计版本增加明确的特殊规则。
+- 战斗结束时仍存活的高阶兽不会因此永久消耗；下一场战斗重新初始化其卡牌实例。
 
 建议字段：
 
+- `beast_instance_id`
 - `source_card_instance_id`
+- `beast_rank`
+- `board_cost`
 - `death_destination`
 - `is_token`
 - `summon_id`
@@ -416,8 +479,6 @@ v0.4.4 应优先实现：
 
 ## 11. 人工决定事项
 
-- `source_card_instance_id` 是否直接存 card instance id，还是存独立 runtime id。
 - 高阶兽是否允许通过奖励直接获得，还是必须事件解锁。
-- token 是否占阵位。
 - 存活承道兽跨波次是否保留当前命源。
 - 敌人攻击承道兽时，guardian 是否可以拦截。
