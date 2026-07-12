@@ -256,3 +256,35 @@ beast_data.source_card_instance_id == source_card.instance_id
 - `TestDaomasterPassives.tscn`
 
 Godot headless 的 RID/ObjectDB cleanup noise 仍视为非阻塞退出噪声。
+
+## v0.4.4.2 死亡通知测试修正
+
+本次补充修复了 `songgui` 死亡通知测试的假通过问题，并做了两项小型一致性修正。
+
+### 送归通知测试
+
+- `_test_death_notification_once()` 现在会临时把 `passive_runtime` 设置为 `songgui`。
+- 测试会保存原始 `passive_id/passive_name/passive_desc`。
+- 第一只普通承道兽死亡后明确断言：
+  - `songgui_triggered_this_battle == true`
+  - `songgui_pending_reward == true`
+  - `discard_pile` 增加 1 张来源卡
+  - source registry 归零
+- 对同一个空槽再次调用伤害入口后明确断言：
+  - `discard_pile` 不再增加
+  - source registry 不再变化
+  - `songgui_triggered_this_battle` 仍为 `true`
+  - `songgui_pending_reward` 仍为 `true`
+- 测试结束前恢复原 passive 设置，并调用 `reset_for_battle()`，避免污染后续测试。
+
+### 高阶术语统一
+
+- `_beast_rank_display("advanced")` 现在显示“高阶”。
+- 内部 rank id 仍保留为 `advanced`，未修改数据结构。
+
+### 出牌道行奖励时机
+
+- v1 出牌基础 5 点道行奖励移动到完整结算成功之后。
+- summon registry 登记失败时不会获得这 5 点道行。
+- summon commit 内部失败并回滚时不会获得这 5 点道行。
+- 承道兽成功召唤时原有额外 20 点道行保持不变。

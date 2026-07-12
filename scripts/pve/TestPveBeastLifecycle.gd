@@ -340,23 +340,41 @@ func _test_death_notification_once(scene: Node) -> bool:
 	var player = scene.get("game_state").players[0]
 	_reset_scene(scene, player)
 	var passive = scene.get("passive_runtime")
-	if passive != null:
-		passive.songgui_triggered_this_battle = false
-		passive.songgui_pending_reward = false
+	if passive == null:
+		return _fail_bool("death notification test requires passive runtime")
+	var original_passive_id := str(passive.passive_id)
+	var original_passive_name := str(passive.passive_name)
+	var original_passive_desc := str(passive.passive_desc)
+	passive.setup_fallback(scene, "songgui", "送归", "")
+	passive.reset_for_battle()
 	var card := _instance("shared_order_jade_deer")
 	player.hand.append(card)
 	_play_selected(scene, card)
 	scene.call("_damage_pve_beast", 0, 0, 999)
 	var discard_count: int = scene.get("discard_pile").size()
 	var registry_count: int = scene.get("pve_beast_runtime").get_active_source_count()
-	var pending := bool(passive.songgui_pending_reward) if passive != null else false
+	var failure := ""
+	if not bool(passive.songgui_triggered_this_battle):
+		failure = "first death should trigger songgui"
+	elif not bool(passive.songgui_pending_reward):
+		failure = "first death should mark songgui pending reward"
+	elif discard_count != 1:
+		failure = "first death should move one source card to discard"
+	elif registry_count != 0:
+		failure = "first death should release source registry"
 	scene.call("_damage_pve_beast", 0, 0, 999)
-	if scene.get("discard_pile").size() != discard_count:
-		return _fail_bool("second death call on empty slot should not add discard")
-	if scene.get("pve_beast_runtime").get_active_source_count() != registry_count:
-		return _fail_bool("second death call on empty slot should not mutate registry")
-	if passive != null and bool(passive.songgui_pending_reward) != pending:
-		return _fail_bool("second death call should not trigger passive again")
+	if failure == "" and scene.get("discard_pile").size() != discard_count:
+		failure = "second death call on empty slot should not add discard"
+	if failure == "" and scene.get("pve_beast_runtime").get_active_source_count() != registry_count:
+		failure = "second death call on empty slot should not mutate registry"
+	if failure == "" and not bool(passive.songgui_triggered_this_battle):
+		failure = "second death call should keep songgui triggered"
+	if failure == "" and not bool(passive.songgui_pending_reward):
+		failure = "second death call should keep songgui pending reward"
+	passive.setup_fallback(scene, original_passive_id, original_passive_name, original_passive_desc)
+	passive.reset_for_battle()
+	if failure != "":
+		return _fail_bool(failure)
 	return true
 
 

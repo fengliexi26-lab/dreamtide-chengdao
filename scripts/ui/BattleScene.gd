@@ -1490,7 +1490,6 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 			_show_failure(str(register_result.get("reason", "承道兽来源登记失败。")))
 			_refresh_all()
 			return
-	Breakthrough.add_dao_progress(player, 5)
 	_log("%s打出了【%s】。" % [player.display_name, card_name])
 
 	var put_into_resolved_pile := true
@@ -1526,6 +1525,7 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 				put_into_resolved_pile = false
 	if put_into_resolved_pile:
 		_put_card_into_pve_resolved_pile(resolved_card)
+	Breakthrough.add_dao_progress(player, 5)
 	_clear_selection()
 	_refresh_all()
 	_check_game_over()
@@ -1623,7 +1623,7 @@ func _build_v1_summon_plan(player: PlayerState, card: Dictionary, target_mode: S
 func _beast_rank_display(rank: String) -> String:
 	match rank:
 		"advanced":
-			return "进阶"
+			return "高阶"
 		"token":
 			return "衍生"
 		"unique":
