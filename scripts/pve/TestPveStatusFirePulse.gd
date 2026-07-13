@@ -5,6 +5,7 @@ const PveStatusRuntimeScript = preload("res://scripts/pve/PveStatusRuntime.gd")
 const PvePulseRuntimeScript = preload("res://scripts/pve/PvePulseRuntime.gd")
 const PveCardEffectAdapterScript = preload("res://scripts/pve/PveCardEffectAdapter.gd")
 const PveCardV1CatalogScript = preload("res://scripts/pve/PveCardV1Catalog.gd")
+const BATTLE_SCENE_PATH := "res://scenes/battle/BattleScene.tscn"
 
 
 func _ready() -> void:
@@ -21,6 +22,8 @@ func _ready() -> void:
 	if not _test_reduce_pulse():
 		return
 	if not _test_adapter_new_effects():
+		return
+	if not await _test_battle_scene_fire_pulse_chain():
 		return
 	print("[TestPveStatusFirePulse] all tests passed")
 	get_tree().quit(0)
@@ -182,6 +185,106 @@ func _effect_card(effect: Dictionary) -> Dictionary:
 		"implementation_phase": "phase_1_base",
 		"effects": [effect]
 	}
+
+
+func _test_battle_scene_fire_pulse_chain() -> bool:
+	var scene: Node = await _boot_battle_scene()
+	if scene == null:
+		return false
+	var player = scene.get("game_state").players[0]
+	_prepare_scene_for_fire_test(scene, player)
+
+	var enemy_target := str(scene.call("_get_enemy_target_id"))
+	scene.call("_apply_pulse_buildup", enemy_target, "fire", 10, "test")
+	var status_runtime = scene.get("pve_status_runtime")
+	var pulse_runtime = scene.get("pve_pulse_runtime")
+	if int(status_runtime.get_status(enemy_target, "zhuomai").get("stacks", 0)) != 3:
+		return _cleanup_scene_fail(scene, "fire break should apply 3 zhuomai")
+	if pulse_runtime.get_buildup(enemy_target, "fire") != 0:
+		return _cleanup_scene_fail(scene, "fire break should consume threshold")
+
+	scene.get("enemy")["block"] = 1
+	var before_enemy_life := int(scene.get("enemy").get("life", 0))
+	scene.call("_process_owner_turn_end_statuses", "enemy")
+	if int(scene.get("enemy").get("life", 0)) != before_enemy_life - 2:
+		return _cleanup_scene_fail(scene, "enemy zhuomai should damage after block")
+	if int(status_runtime.get_status(enemy_target, "zhuomai").get("stacks", 0)) != 2:
+		return _cleanup_scene_fail(scene, "enemy zhuomai should decay")
+
+	var player_target := str(scene.call("_get_player_target_id"))
+	scene.call("_apply_pulse_buildup", player_target, "fire", 25, "test")
+	if pulse_runtime.get_buildup(player_target, "fire") != 5:
+		return _cleanup_scene_fail(scene, "player fire overflow should remain 5")
+	if int(status_runtime.get_status(player_target, "zhuomai").get("stacks", 0)) != 5:
+		return _cleanup_scene_fail(scene, "two fire breaks should stack zhuomai to 5")
+
+	player.formation_value = 2
+	var before_player_life := int(player.life_source)
+	scene.call("_process_owner_turn_end_statuses", "player")
+	if int(player.life_source) != before_player_life - 3:
+		return _cleanup_scene_fail(scene, "player zhuomai should damage through formation")
+	if int(status_runtime.get_status(player_target, "zhuomai").get("stacks", 0)) != 4:
+		return _cleanup_scene_fail(scene, "player zhuomai should decay")
+
+	var full_pulse := int(scene.call("_calculate_attack_pulse_amount", 4, {"life_damage": 0, "defense_broken": true}, false))
+	var half_pulse := int(scene.call("_calculate_attack_pulse_amount", 5, {"life_damage": 0, "defense_broken": false}, false))
+	var conductive_pulse := int(scene.call("_calculate_attack_pulse_amount", 5, {"life_damage": 0, "defense_broken": false}, true))
+	if full_pulse != 4 or half_pulse != 2 or conductive_pulse != 5:
+		return _cleanup_scene_fail(scene, "attack pulse scaling should follow defense/life/conductive rules")
+
+	scene.get("enemy")["turn_index"] = 1
+	scene.call("_set_enemy_intent")
+	if str(scene.get("enemy").get("intent", "")) != "fire_attack":
+		return _cleanup_scene_fail(scene, "enemy second intent should be fire_attack")
+
+	scene.call("_start_pve_battle")
+	await get_tree().process_frame
+	if scene.get("pve_status_runtime").has_status(player_target, "zhuomai"):
+		return _cleanup_scene_fail(scene, "restart should clear status runtime")
+	if scene.get("pve_pulse_runtime").get_buildup(player_target, "fire") != 0:
+		return _cleanup_scene_fail(scene, "restart should clear pulse runtime")
+	_cleanup_scene(scene)
+	return true
+
+
+func _boot_battle_scene():
+	var packed_scene: PackedScene = load(BATTLE_SCENE_PATH)
+	if packed_scene == null:
+		return null
+	var scene: Node = packed_scene.instantiate()
+	add_child(scene)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	return scene
+
+
+func _prepare_scene_for_fire_test(scene: Node, player) -> void:
+	player.hand.clear()
+	player.formation_value = 0
+	player.life_source = player.max_life_source
+	scene.get("draw_pile").clear()
+	scene.get("discard_pile").clear()
+	scene.get("exhaust_pile").clear()
+	scene.get("enemy")["life"] = 80
+	scene.get("enemy")["block"] = 0
+	scene.get("enemy")["turn_index"] = 0
+	scene.set("game_over", false)
+	if scene.get("pve_event_queue") != null:
+		scene.get("pve_event_queue").reset()
+	if scene.get("pve_status_runtime") != null:
+		scene.get("pve_status_runtime").reset()
+	if scene.get("pve_pulse_runtime") != null:
+		scene.get("pve_pulse_runtime").reset()
+
+
+func _cleanup_scene(scene: Node) -> void:
+	remove_child(scene)
+	scene.queue_free()
+
+
+func _cleanup_scene_fail(scene: Node, message: String) -> bool:
+	_cleanup_scene(scene)
+	return _fail_bool(message)
 
 
 func _fail_bool(message: String) -> bool:
