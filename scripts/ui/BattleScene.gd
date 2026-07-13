@@ -9,6 +9,9 @@ const PassiveRuntimeScript = preload("res://scripts/pve/DaomasterPassiveRuntime.
 const PveCardV1CatalogScript = preload("res://scripts/pve/PveCardV1Catalog.gd")
 const PveCardEffectAdapterScript = preload("res://scripts/pve/PveCardEffectAdapter.gd")
 const PveBeastRuntimeScript = preload("res://scripts/pve/PveBeastRuntime.gd")
+const PveCombatEventQueueScript = preload("res://scripts/pve/PveCombatEventQueue.gd")
+const PveStatusRuntimeScript = preload("res://scripts/pve/PveStatusRuntime.gd")
+const PvePulseRuntimeScript = preload("res://scripts/pve/PvePulseRuntime.gd")
 const MAIN_DECK_SIZE := 40
 const SIDE_DECK_SIZE := 15
 const HAND_LIMIT := 10
@@ -67,6 +70,9 @@ var passive_runtime
 var pve_card_catalog
 var pve_effect_adapter
 var pve_beast_runtime
+var pve_event_queue
+var pve_status_runtime
+var pve_pulse_runtime
 var pve_card_data_mode := "legacy_fallback"
 var pve_card_fallback_reason := ""
 var extra_stats := {}
@@ -578,6 +584,12 @@ func _start_pve_battle() -> void:
 	pve_effect_adapter = PveCardEffectAdapterScript.new()
 	pve_beast_runtime = PveBeastRuntimeScript.new()
 	pve_beast_runtime.reset()
+	pve_event_queue = PveCombatEventQueueScript.new()
+	pve_event_queue.reset()
+	pve_status_runtime = PveStatusRuntimeScript.new()
+	pve_status_runtime.reset()
+	pve_pulse_runtime = PvePulseRuntimeScript.new()
+	pve_pulse_runtime.reset()
 	pve_card_data_mode = "legacy_fallback"
 	pve_card_fallback_reason = ""
 	var run_state = RunStateScript.get_current()
@@ -663,12 +675,21 @@ func _set_enemy_intent() -> void:
 	if step == 0:
 		enemy["intent"] = "attack"
 		enemy["intent_value"] = 12
+		enemy["pulse_id"] = ""
+		enemy["pulse_value"] = 0
+		enemy["conductive"] = false
 	elif step == 1:
-		enemy["intent"] = "attack"
+		enemy["intent"] = "fire_attack"
 		enemy["intent_value"] = 8
+		enemy["pulse_id"] = "fire"
+		enemy["pulse_value"] = 4
+		enemy["conductive"] = false
 	else:
 		enemy["intent"] = "buff"
 		enemy["intent_value"] = 6
+		enemy["pulse_id"] = ""
+		enemy["pulse_value"] = 0
+		enemy["conductive"] = false
 
 
 func _run_deck_ids(run_state) -> Array[String]:
@@ -705,6 +726,12 @@ func _build_v1_pve_deck(run_state) -> Dictionary:
 func _start_pve_battle_load_error(reason: String, run_state) -> void:
 	pve_beast_runtime = PveBeastRuntimeScript.new()
 	pve_beast_runtime.reset()
+	pve_event_queue = PveCombatEventQueueScript.new()
+	pve_event_queue.reset()
+	pve_status_runtime = PveStatusRuntimeScript.new()
+	pve_status_runtime.reset()
+	pve_pulse_runtime = PvePulseRuntimeScript.new()
+	pve_pulse_runtime.reset()
 	pve_card_data_mode = "pve_v1_error"
 	card_load_error = reason
 	push_error("[BattleScene] %s" % reason)
@@ -1239,6 +1266,9 @@ func _on_central_battlefield_pressed() -> void:
 		return
 	var player := game_state.get_active_player()
 	var card_type := str(selected_card.get("type", ""))
+	if _is_pve_v1_card(selected_card) and card_type == CardTypes.DAOFA and not _v1_card_can_play_on_self(selected_card):
+		_show_failure("道法牌需要选择敌人目标。")
+		return
 	if _is_pve_v1_card(selected_card):
 		_play_v1_selected_card(player, "self")
 		return
@@ -1494,6 +1524,7 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 
 	var put_into_resolved_pile := true
 	var effects: Array = pve_effect_adapter.get_effects(resolved_card)
+	var source_id := str(resolved_card.get("instance_id", resolved_card.get("id", card_name)))
 	for effect in effects:
 		if typeof(effect) != TYPE_DICTIONARY:
 			continue
@@ -1501,8 +1532,9 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 		var value := int(effect.get("value", 0))
 		match effect_type:
 			"deal_damage":
-				var actual := _damage_enemy(value)
-				_log("【%s】对%s造成 %d 点伤害。" % [card_name, str(enemy.get("name", "敌人")), actual])
+				var damage_result := _damage_enemy_with_result(value)
+				_log("【%s】对%s造成 %d 点伤害。" % [card_name, str(enemy.get("name", "敌人")), int(damage_result.get("life_damage", 0))])
+				_apply_attack_pulse_from_damage(_get_enemy_target_id(), effect, damage_result, source_id)
 			"gain_formation":
 				gain_formation(value, card_name)
 				_log("【%s】获得 %d 点阵势。" % [card_name, value])
@@ -1518,6 +1550,37 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 			"reduce_reflux":
 				_add_return_tide(player, -value)
 				_log("【%s】回潮值 -%d，当前回潮值 %d。" % [card_name, value, _get_return_tide(player)])
+			"add_pulse_buildup":
+				var pulse_target_id := _resolve_effect_target_id(effect, player)
+				if _should_skip_effect_for_defeated_target(pulse_target_id, "火脉积蓄"):
+					continue
+				_apply_pulse_buildup(pulse_target_id, str(effect.get("pulse_id", "")), value, source_id)
+			"reduce_pulse_buildup":
+				var reduce_target_id := _resolve_effect_target_id(effect, player)
+				if _should_skip_effect_for_defeated_target(reduce_target_id, "火脉削减"):
+					continue
+				_reduce_pulse_buildup(reduce_target_id, str(effect.get("pulse_id", "")), value, source_id)
+			"apply_status":
+				var status_target_id := _resolve_effect_target_id(effect, player)
+				if _should_skip_effect_for_defeated_target(status_target_id, "状态施加"):
+					continue
+				var status_stacks := int(effect.get("stacks", 0))
+				var applied := _apply_combat_status(status_target_id, {
+					"status_id": str(effect.get("status_id", "")),
+					"display_name": str(effect.get("display_name", effect.get("status_id", ""))),
+					"stacks": status_stacks,
+					"max_stacks": int(effect.get("max_stacks", 0)),
+					"tick_timing": str(effect.get("tick_timing", "owner_turn_end")),
+					"source_id": source_id,
+					"tags": effect.get("tags", [])
+				})
+				if not applied.is_empty():
+					_log("%s获得%s %d 层，当前 %d 层。" % [
+						_target_display_name(status_target_id),
+						str(applied.get("display_name", applied.get("status_id", "状态"))),
+						status_stacks,
+						int(applied.get("stacks", 0))
+					])
 			"summon":
 				if not _commit_v1_summon_plan(summon_plan):
 					_handle_v1_summon_internal_failure(player, before_daoxi, int(hand_entry.get("index", -1)), resolved_card, summon_plan)
@@ -1540,13 +1603,15 @@ func _validate_v1_target_and_capacity(card: Dictionary, target_mode: String, sum
 	var unsupported: Array = pve_effect_adapter.get_unsupported_effect_types(card)
 	if not unsupported.is_empty():
 		return "暂未支持该 v1 效果：%s" % str(unsupported)
-	var has_damage: bool = not pve_effect_adapter.get_effects_by_type(card, "deal_damage").is_empty()
-	if has_damage and target_mode != "enemy":
+	var target_profile := _get_v1_effect_target_profile(card)
+	if not bool(target_profile.get("valid", false)):
+		return str(target_profile.get("reason", "v1 效果目标不合法。"))
+	var requires_enemy_selection := bool(target_profile.get("requires_enemy_selection", false))
+	if requires_enemy_selection and target_mode != "enemy":
 		return "道法牌需要选择敌人目标。"
-	var has_self_effect: bool = _v1_has_non_damage_effect(card)
-	if target_mode == "enemy" and not has_damage:
+	if target_mode == "enemy" and not requires_enemy_selection:
 		return "该牌不需要选择敌人目标。"
-	if target_mode == "self" and not has_self_effect and not _v1_has_summon_effect(card):
+	if target_mode == "self" and requires_enemy_selection:
 		return "该牌需要选择敌人目标。"
 	if _v1_has_summon_effect(card):
 		if summon_plan.is_empty():
@@ -1554,6 +1619,59 @@ func _validate_v1_target_and_capacity(card: Dictionary, target_mode: String, sum
 		if not bool(summon_plan.get("ok", false)):
 			return str(summon_plan.get("reason", "无法召唤承道兽。"))
 	return ""
+
+
+func _v1_card_can_play_on_self(card: Dictionary) -> bool:
+	var target_profile := _get_v1_effect_target_profile(card)
+	return bool(target_profile.get("valid", false)) and not bool(target_profile.get("requires_enemy_selection", false))
+
+
+func _get_v1_effect_target_profile(card: Dictionary) -> Dictionary:
+	var result := {
+		"has_enemy_effect": false,
+		"has_self_effect": false,
+		"requires_enemy_selection": false,
+		"valid": true,
+		"reason": ""
+	}
+	if pve_effect_adapter == null:
+		result.valid = false
+		result.reason = "v1 效果适配器未初始化。"
+		return result
+	for effect in pve_effect_adapter.get_effects(card):
+		if typeof(effect) != TYPE_DICTIONARY:
+			continue
+		var effect_dict: Dictionary = effect
+		var effect_type := str(effect_dict.get("type", ""))
+		var target := str(effect_dict.get("target", ""))
+		if target == "":
+			result.valid = false
+			result.reason = "v1 效果缺少 target。"
+			return result
+		var is_enemy_effect := false
+		var is_self_effect := false
+		match effect_type:
+			"deal_damage":
+				is_enemy_effect = target == "enemy"
+			"add_pulse_buildup", "reduce_pulse_buildup", "apply_status":
+				is_enemy_effect = target == "enemy"
+				is_self_effect = target == "self" or target == "player"
+			"gain_formation", "draw", "gain_daoxi", "gain_reflux", "reduce_reflux", "summon":
+				is_self_effect = target == "self" or target == "player"
+			_:
+				result.valid = false
+				result.reason = "暂未支持该 v1 效果：%s。" % effect_type
+				return result
+		if not is_enemy_effect and not is_self_effect:
+			result.valid = false
+			result.reason = "v1 效果 target 不合法：%s -> %s。" % [effect_type, target]
+			return result
+		if is_enemy_effect:
+			result.has_enemy_effect = true
+		if is_self_effect:
+			result.has_self_effect = true
+	result.requires_enemy_selection = bool(result.get("has_enemy_effect", false))
+	return result
 
 
 func _v1_has_non_damage_effect(card: Dictionary) -> bool:
@@ -1740,14 +1858,391 @@ func _play_daofa_against_enemy(player: PlayerState) -> void:
 
 
 func _damage_enemy(amount: int) -> int:
+	return int(_damage_enemy_with_result(amount).get("life_damage", 0))
+
+
+func _damage_enemy_with_result(amount: int) -> Dictionary:
 	var block := int(enemy.get("block", 0))
-	var blocked := mini(block, amount)
-	var remaining := amount - blocked
+	var blocked := mini(block, maxi(0, amount))
+	var remaining := maxi(0, amount - blocked)
 	enemy["block"] = maxi(0, block - blocked)
 	enemy["life"] = maxi(0, int(enemy.get("life", 0)) - remaining)
 	if blocked > 0:
 		_log("%s护盾抵挡 %d 点伤害。" % [str(enemy.get("name", "敌人")), blocked])
-	return remaining
+	return {
+		"amount": amount,
+		"blocked": blocked,
+		"life_damage": remaining,
+		"defense_before": block,
+		"defense_after": int(enemy.get("block", 0)),
+		"defense_broken": block > 0 and int(enemy.get("block", 0)) == 0,
+		"target_defeated": int(enemy.get("life", 0)) <= 0
+	}
+
+
+func _damage_player_with_result(player: PlayerState, amount: int) -> Dictionary:
+	var defense_before := player.formation_value
+	var blocked := mini(defense_before, maxi(0, amount))
+	var damage_to_life := maxi(0, amount - blocked)
+	player.formation_value = maxi(0, player.formation_value - blocked)
+	if damage_to_life > 0:
+		player.take_damage(damage_to_life)
+	return {
+		"amount": amount,
+		"blocked": blocked,
+		"life_damage": damage_to_life,
+		"defense_before": defense_before,
+		"defense_after": player.formation_value,
+		"defense_broken": defense_before > 0 and player.formation_value == 0,
+		"target_defeated": player.life_source <= 0
+	}
+
+
+func _calculate_attack_pulse_amount(base_buildup: int, damage_result: Dictionary, conductive: bool) -> int:
+	if base_buildup <= 0:
+		return 0
+	if conductive:
+		return base_buildup
+	if int(damage_result.get("life_damage", 0)) > 0:
+		return base_buildup
+	if bool(damage_result.get("defense_broken", false)):
+		return base_buildup
+	return int(floor(float(base_buildup) * 0.5))
+
+
+func _apply_attack_pulse_from_damage(target_id: String, effect: Dictionary, damage_result: Dictionary, source_id: String) -> void:
+	if not effect.has("pulse_id") and not effect.has("pulse_value"):
+		return
+	if bool(damage_result.get("target_defeated", false)):
+		_log("目标已经被击败，附带火脉不再结算。")
+		return
+	var pulse_id := str(effect.get("pulse_id", ""))
+	var base_buildup := int(effect.get("pulse_value", 0))
+	if pulse_id == "" or base_buildup <= 0:
+		return
+	var conductive := bool(effect.get("conductive", false))
+	var amount := _calculate_attack_pulse_amount(base_buildup, damage_result, conductive)
+	if amount <= 0:
+		_log("%s未形成有效火脉积蓄。" % _target_display_name(target_id))
+		return
+	_log("%s火脉积蓄 +%d。" % [_target_display_name(target_id), amount])
+	_apply_pulse_buildup(target_id, pulse_id, amount, source_id)
+
+
+func _apply_pulse_buildup(target_id: String, pulse_id: String, amount: int, source_id: String = "") -> Dictionary:
+	if pve_pulse_runtime == null:
+		return {"ok": false, "reason": "脉冲运行时未初始化。"}
+	var skip_reason := _defeated_target_skip_message(target_id, "火脉积蓄")
+	if skip_reason != "":
+		_log(skip_reason)
+		return {"ok": false, "reason": skip_reason}
+	if not _is_known_combat_target_id(target_id):
+		var reason := "无法增加火脉：目标无效或已死亡。target_id=%s" % target_id
+		push_error("[BattleScene] %s" % reason)
+		_log(reason)
+		return {"ok": false, "reason": reason}
+	var result: Dictionary = pve_pulse_runtime.add_buildup(target_id, pulse_id, amount)
+	if not bool(result.get("ok", false)):
+		_log(str(result.get("reason", "火脉积蓄失败。")))
+		return result
+	_queue_combat_event("pulse_buildup_changed", {
+		"target_id": target_id,
+		"pulse_id": pulse_id,
+		"amount": amount,
+		"before": int(result.get("before", 0)),
+		"after": int(result.get("after", 0)),
+		"source_id": source_id
+	})
+	var breaks := int(result.get("breaks", 0))
+	for _i in range(breaks):
+		_queue_combat_event("pulse_break_triggered", {
+			"target_id": target_id,
+			"pulse_id": pulse_id,
+			"source_id": source_id
+		})
+		_apply_fire_break_status(target_id, source_id)
+	_drain_combat_events()
+	return result
+
+
+func _reduce_pulse_buildup(target_id: String, pulse_id: String, amount: int, source_id: String = "") -> Dictionary:
+	if pve_pulse_runtime == null:
+		return {"ok": false, "reason": "脉冲运行时未初始化。"}
+	var skip_reason := _defeated_target_skip_message(target_id, "火脉削减")
+	if skip_reason != "":
+		_log(skip_reason)
+		return {"ok": false, "reason": skip_reason}
+	if not _is_known_combat_target_id(target_id):
+		var reason := "无法减少火脉：目标无效或已死亡。target_id=%s" % target_id
+		push_error("[BattleScene] %s" % reason)
+		_log(reason)
+		return {"ok": false, "reason": reason}
+	var result: Dictionary = pve_pulse_runtime.reduce_buildup(target_id, pulse_id, amount)
+	if bool(result.get("ok", false)):
+		_queue_combat_event("pulse_buildup_reduced", {
+			"target_id": target_id,
+			"pulse_id": pulse_id,
+			"amount": int(result.get("reduced", 0)),
+			"after": int(result.get("after", 0)),
+			"source_id": source_id
+		})
+		_drain_combat_events()
+	return result
+
+
+func _apply_fire_break_status(target_id: String, source_id: String = "") -> void:
+	if pve_status_runtime == null:
+		return
+	var current: Dictionary = pve_status_runtime.get_status(target_id, "zhuomai")
+	var stacks := 2 if not current.is_empty() else 3
+	var status := _apply_combat_status(target_id, {
+		"status_id": "zhuomai",
+		"stacks": stacks,
+		"source_id": source_id,
+		"tags": ["pulse", "fire", "damage_over_time"]
+	})
+	_log("火脉失衡：%s获得灼脉 %d，当前灼脉 %d。" % [
+		_target_display_name(target_id),
+		stacks,
+		int(status.get("stacks", 0))
+	])
+
+
+func _apply_combat_status(target_id: String, status_spec: Dictionary) -> Dictionary:
+	if pve_status_runtime == null:
+		return {}
+	var skip_reason := _defeated_target_skip_message(target_id, "状态施加")
+	if skip_reason != "":
+		_log(skip_reason)
+		return {}
+	if not _is_known_combat_target_id(target_id):
+		var reason := "无法施加状态：目标无效或已死亡。target_id=%s" % target_id
+		push_error("[BattleScene] %s" % reason)
+		_log(reason)
+		return {}
+	var normalized_spec := _normalize_combat_status_spec(status_spec)
+	var apply_result: Dictionary = pve_status_runtime.apply_status(target_id, normalized_spec)
+	var status: Dictionary = apply_result.get("status", {})
+	if not status.is_empty():
+		_queue_combat_event("status_applied", {
+			"target_id": target_id,
+			"status_id": str(status.get("status_id", "")),
+			"stacks": int(status.get("stacks", 0)),
+			"source_id": str(normalized_spec.get("source_id", ""))
+		})
+		_drain_combat_events()
+	return status
+
+
+func _normalize_combat_status_spec(status_spec: Dictionary) -> Dictionary:
+	var normalized := status_spec.duplicate(true)
+	var status_id := str(normalized.get("status_id", ""))
+	if status_id == "zhuomai":
+		normalized["status_id"] = "zhuomai"
+		normalized["display_name"] = "灼脉"
+		normalized["max_stacks"] = 6
+		normalized["duration"] = -1
+		normalized["tick_timing"] = "owner_turn_end"
+		normalized["visible"] = true
+		var tags: Array = []
+		if typeof(normalized.get("tags", [])) == TYPE_ARRAY:
+			tags = normalized.get("tags", []).duplicate(true)
+		for required_tag in ["pulse", "fire", "damage_over_time"]:
+			if not tags.has(required_tag):
+				tags.append(required_tag)
+		normalized["tags"] = tags
+	return normalized
+
+
+func _can_apply_runtime_to_target(target_id: String) -> bool:
+	return target_id != "" and _is_target_alive(target_id)
+
+
+func _is_known_combat_target_id(target_id: String) -> bool:
+	if target_id == _get_player_target_id() or target_id == _get_enemy_target_id():
+		return true
+	if target_id.begins_with("beast:"):
+		return bool(_find_beast_slot_by_target_id(target_id).get("ok", false))
+	return false
+
+
+func _defeated_target_skip_message(target_id: String, effect_name: String) -> String:
+	if _is_known_combat_target_id(target_id) and not _is_target_alive(target_id):
+		return "目标已失效，【%s】未能生效。" % effect_name
+	return ""
+
+
+func _should_skip_effect_for_defeated_target(target_id: String, effect_name: String) -> bool:
+	var message := _defeated_target_skip_message(target_id, effect_name)
+	if message == "":
+		return false
+	_log(message)
+	return true
+
+
+func _queue_combat_event(event_type: String, payload: Dictionary = {}, parent_event_id: String = "") -> Dictionary:
+	if pve_event_queue == null:
+		return {}
+	return pve_event_queue.enqueue(event_type, payload, parent_event_id)
+
+
+func _drain_combat_events() -> void:
+	if pve_event_queue == null or pve_event_queue.get_pending_count() <= 0:
+		return
+	pve_event_queue.drain(Callable(self, "_handle_combat_event"))
+
+
+func _handle_combat_event(_event: Dictionary) -> void:
+	pass
+
+
+func _get_player_target_id() -> String:
+	return "player:p1"
+
+
+func _get_enemy_target_id() -> String:
+	return "enemy:primary"
+
+
+func _get_beast_target_id(beast_data: Dictionary) -> String:
+	return "beast:%s" % str(beast_data.get("beast_instance_id", ""))
+
+
+func _resolve_effect_target_id(effect: Dictionary, _player: PlayerState) -> String:
+	var target := str(effect.get("target", "enemy"))
+	if target == "self" or target == "player":
+		return _get_player_target_id()
+	if target == "enemy":
+		return _get_enemy_target_id()
+	return ""
+
+
+func _find_beast_slot_by_target_id(target_id: String) -> Dictionary:
+	if not target_id.begins_with("beast:"):
+		return {"ok": false}
+	var beast_id := target_id.substr("beast:".length())
+	if beast_id == "":
+		return {"ok": false}
+	for owner_index in range(player_boards.size()):
+		for slot_index in range(_slot_count(CardTypes.CHENGDAO)):
+			var beast := player_boards[owner_index].get_card(CardTypes.CHENGDAO, slot_index)
+			if not beast.is_empty() and str(beast.get("beast_instance_id", "")) == beast_id:
+				return {"ok": true, "owner_index": owner_index, "slot_index": slot_index, "beast": beast}
+	return {"ok": false}
+
+
+func _is_target_alive(target_id: String) -> bool:
+	if target_id == _get_player_target_id():
+		return game_state != null and game_state.players.size() > 0 and game_state.players[0].life_source > 0
+	if target_id == _get_enemy_target_id():
+		return not enemy.is_empty() and int(enemy.get("life", 0)) > 0
+	if target_id.begins_with("beast:"):
+		return bool(_find_beast_slot_by_target_id(target_id).get("ok", false))
+	return false
+
+
+func _target_display_name(target_id: String) -> String:
+	if target_id == _get_player_target_id():
+		return _dao_master_name(game_state.players[0]) if game_state != null and game_state.players.size() > 0 else "玩家"
+	if target_id == _get_enemy_target_id():
+		return str(enemy.get("name", "敌人"))
+	if target_id.begins_with("beast:"):
+		var slot := _find_beast_slot_by_target_id(target_id)
+		if bool(slot.get("ok", false)):
+			var beast: Dictionary = slot.get("beast", {})
+			return str(beast.get("name", "承道兽"))
+	return target_id
+
+
+func _format_target_runtime_state(target_id: String) -> String:
+	var parts: Array[String] = []
+	if pve_pulse_runtime != null:
+		var fire: int = pve_pulse_runtime.get_buildup(target_id, "fire")
+		if fire > 0:
+			parts.append("火脉 %d / %d" % [fire, PvePulseRuntimeScript.FIRE_THRESHOLD])
+	if pve_status_runtime != null:
+		var zhuomai: Dictionary = pve_status_runtime.get_status(target_id, "zhuomai")
+		if not zhuomai.is_empty():
+			parts.append("灼脉 %d" % int(zhuomai.get("stacks", 0)))
+	if parts.is_empty():
+		return "状态：无"
+	return "状态：%s" % _array_text_with_separator(parts, "，")
+
+
+func _process_owner_turn_end_statuses(owner_side: String) -> void:
+	if pve_status_runtime == null:
+		return
+	var targets: Array[String] = []
+	if owner_side == "player":
+		targets.append(_get_player_target_id())
+		for slot_index in range(_slot_count(CardTypes.CHENGDAO)):
+			var beast: Dictionary = player_boards[0].get_card(CardTypes.CHENGDAO, slot_index)
+			if not beast.is_empty() and str(beast.get("beast_instance_id", "")) != "":
+				targets.append(_get_beast_target_id(beast))
+	elif owner_side == "enemy":
+		targets.append(_get_enemy_target_id())
+	for target_id in targets:
+		if game_over or not _is_target_alive(target_id):
+			continue
+		var status: Dictionary = pve_status_runtime.get_status(target_id, "zhuomai")
+		if status.is_empty():
+			continue
+		var stacks := int(status.get("stacks", 0))
+		if stacks <= 0:
+			continue
+		var target_name := _target_display_name(target_id)
+		_queue_combat_event("status_tick", {
+			"target_id": target_id,
+			"status_id": "zhuomai",
+			"stacks": stacks,
+			"timing": "owner_turn_end"
+		})
+		var blocked := 0
+		var life_damage := stacks
+		if target_id == _get_player_target_id():
+			var player := game_state.players[0]
+			var result := _damage_player_with_result(player, stacks)
+			blocked = int(result.get("blocked", 0))
+			life_damage = int(result.get("life_damage", 0))
+		elif target_id == _get_enemy_target_id():
+			var enemy_result := _damage_enemy_with_result(stacks)
+			blocked = int(enemy_result.get("blocked", 0))
+			life_damage = int(enemy_result.get("life_damage", 0))
+		else:
+			var slot := _find_beast_slot_by_target_id(target_id)
+			if bool(slot.get("ok", false)):
+				_damage_pve_beast(int(slot.get("owner_index", 0)), int(slot.get("slot_index", 0)), stacks)
+		_log("灼脉结算：%s受到 %d 点灼脉伤害，抵挡 %d，命源伤害 %d。" % [
+			target_name,
+			stacks,
+			blocked,
+			life_damage
+		])
+		_queue_combat_event("status_damage_resolved", {
+			"target_id": target_id,
+			"status_id": "zhuomai",
+			"amount": stacks,
+			"blocked": blocked,
+			"life_damage": life_damage
+		})
+		if _is_target_alive(target_id):
+			var new_stacks := stacks - 1
+			if new_stacks > 0:
+				pve_status_runtime.set_stacks(target_id, "zhuomai", new_stacks)
+				_log("灼脉衰减：%s当前灼脉 %d。" % [target_name, new_stacks])
+			else:
+				pve_status_runtime.remove_status(target_id, "zhuomai")
+				_queue_combat_event("status_removed", {"target_id": target_id, "status_id": "zhuomai"})
+				_log("灼脉消散：%s不再拥有灼脉。" % target_name)
+		_check_game_over()
+	_drain_combat_events()
+
+
+func _clear_combat_target_runtime_state(target_id: String) -> void:
+	if pve_status_runtime != null:
+		pve_status_runtime.clear_target(target_id)
+	if pve_pulse_runtime != null:
+		pve_pulse_runtime.clear_target(target_id)
 
 
 func _apply_simple_enter_effect(player: PlayerState, card: Dictionary) -> void:
@@ -1855,6 +2350,10 @@ func _finish_end_turn(player: PlayerState) -> void:
 	_clear_selection()
 	if game_mode == "pve":
 		_end_pve_player_turn(player)
+		_check_game_over()
+		if game_over:
+			_refresh_all()
+			return
 		_run_enemy_turn(player)
 		if not game_over:
 			_start_pve_player_turn(player, false)
@@ -1884,6 +2383,7 @@ func _end_pve_player_turn(player: PlayerState) -> void:
 	_log("回合结束，弃置 %d 张手牌，保留 %d 张。" % [discarded_count, kept.size()])
 	if passive_runtime != null:
 		passive_runtime.on_player_turn_end()
+	_process_owner_turn_end_statuses("player")
 	var stats: Dictionary = extra_stats.get(player.id, {"dao_breath": 0, "return_tide": 0})
 	stats["dao_breath"] = 0
 	extra_stats[player.id] = stats
@@ -1895,23 +2395,39 @@ func _run_enemy_turn(player: PlayerState) -> void:
 	_log("敌人回合：%s执行意图【%s】。" % [str(enemy.get("name", "敌人")), _enemy_intent_text()])
 	var intent := str(enemy.get("intent", "attack"))
 	var value := int(enemy.get("intent_value", 0))
-	if intent == "attack":
-		var blocked := mini(player.formation_value, value)
-		var damage_to_life := maxi(0, value - blocked)
-		player.formation_value = maxi(0, player.formation_value - blocked)
-		if damage_to_life > 0:
-			player.take_damage(damage_to_life)
+	if intent == "attack" or intent == "fire_attack":
+		var damage_result := _damage_player_with_result(player, value)
 		_log("%s攻击 %d，阵势抵挡 %d，玩家受到 %d 点伤害。" % [
 			str(enemy.get("name", "敌人")),
 			value,
-			blocked,
-			damage_to_life
+			int(damage_result.get("blocked", 0)),
+			int(damage_result.get("life_damage", 0))
 		])
+		if intent == "fire_attack":
+			var intent_pulse_id := str(enemy.get("pulse_id", "fire"))
+			if intent_pulse_id == "":
+				intent_pulse_id = "fire"
+			_apply_attack_pulse_from_damage(
+				_get_player_target_id(),
+				{
+					"pulse_id": intent_pulse_id,
+					"pulse_value": int(enemy.get("pulse_value", 0)),
+					"conductive": bool(enemy.get("conductive", false))
+				},
+				damage_result,
+				str(enemy.get("id", "enemy"))
+			)
 	elif intent == "buff":
 		enemy["block"] = int(enemy.get("block", 0)) + value
 		_log("%s蓄势，获得 %d 点护盾。" % [str(enemy.get("name", "敌人")), value])
 	else:
 		_log("%s暂时观望。" % str(enemy.get("name", "敌人")))
+	_check_game_over()
+	if game_over:
+		return
+	_process_owner_turn_end_statuses("enemy")
+	if game_over:
+		return
 	enemy["turn_index"] = int(enemy.get("turn_index", 0)) + 1
 	_set_enemy_intent()
 	_check_game_over()
@@ -2200,12 +2716,13 @@ func _refresh_enemy_area() -> void:
 	if enemy_info_label == null or enemy.is_empty():
 		return
 	var state_text := "已结束" if game_over else "进行中"
-	enemy_info_label.text = "敌人名：%s\n生命：%d / %d\n意图：%s\n护盾：%d\n状态：%s" % [
+	enemy_info_label.text = "敌人名：%s\n生命：%d / %d\n意图：%s\n护盾：%d\n%s\n状态：%s" % [
 		str(enemy.get("name", "敌人")),
 		int(enemy.get("life", 0)),
 		int(enemy.get("max_life", 0)),
 		_enemy_intent_text(),
 		int(enemy.get("block", 0)),
+		_format_target_runtime_state(_get_enemy_target_id()),
 		state_text
 	]
 	if enemy_target_button != null:
@@ -2222,6 +2739,9 @@ func _enemy_intent_text() -> String:
 	var value := int(enemy.get("intent_value", 0))
 	if intent == "attack":
 		return "攻击 %d" % value
+	if intent == "fire_attack":
+		var conductive_text := "传导" if bool(enemy.get("conductive", false)) else "非传导"
+		return "火脉攻击 %d｜火脉积蓄 %d｜%s" % [value, int(enemy.get("pulse_value", 0)), conductive_text]
 	if intent == "buff":
 		return "蓄势 +%d 护盾" % value
 	if intent == "wait":
@@ -2236,11 +2756,12 @@ func _refresh_resource_summary(player: PlayerState) -> void:
 	var board_capacity := 0
 	if game_mode == "pve" and pve_beast_runtime != null:
 		board_capacity = pve_beast_runtime.get_used_capacity(player_boards[0].get_cards_in_slots(CardTypes.CHENGDAO))
-	resource_summary_label.text = "资源摘要\n道息：%d\n阵势值：%d\n回潮值：%d\n道行值：%d\n承道占位：%d / 3\n当前回合：%d" % [
+	resource_summary_label.text = "资源摘要\n道息：%d\n阵势值：%d\n回潮值：%d\n道行值：%d\n%s\n承道占位：%d / 3\n当前回合：%d" % [
 		int(stats.get("dao_breath", 0)),
 		player.formation_value,
 		int(stats.get("return_tide", 0)),
 		player.dao_progress,
+		_format_target_runtime_state(_get_player_target_id()),
 		board_capacity,
 		game_state.turn_number
 	]
@@ -2558,6 +3079,9 @@ func _format_battlefield_card(owner_index: int, slot_type: String, card: Diction
 		])
 		if bool(card.get("has_attacked", false)):
 			lines.append("已行动")
+		var runtime_state := _format_target_runtime_state(_get_beast_target_id(card))
+		if runtime_state != "状态：无":
+			lines.append(runtime_state.replace("状态：", ""))
 	return _array_text_with_separator(lines, "\n")
 
 
@@ -2584,7 +3108,7 @@ func _on_help_pressed() -> void:
 	var label := Label.new()
 	label.custom_minimum_size = Vector2(420, 220)
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	label.text = "1. 道主牌不是手牌。\n2. 道主牌不进入承道位。\n3. 点击底部分类手牌选择卡牌。\n4. 持续牌点击中央战场区打出。\n5. 道法牌点击顶部敌人目标。\n6. 点击中央战场区己方承道兽选择攻击者，再点击敌人目标。\n7. 玩家回合开始固定抽 5 张，手牌上限 10。\n8. 结束回合会自动弃置非凝梦 / 保留手牌。"
+	label.text = "1. 道主牌不是手牌。\n2. 道主牌不进入承道位。\n3. 点击底部分类手牌选择卡牌。\n4. 持续牌点击中央战场区打出。\n5. 道法牌点击顶部敌人目标。\n6. 点击中央战场区己方承道兽选择攻击者，再点击敌人目标。\n7. 玩家回合开始固定抽 5 张，手牌上限 10。\n8. 结束回合会自动弃置非凝梦 / 保留手牌。\n9. 火脉积蓄达到 10 时会触发灼脉，超过阈值的积蓄会保留。\n10. 灼脉会在目标所属阵营回合结束时造成伤害，然后减少 1 层。"
 	dialog.add_child(label)
 	add_child(dialog)
 	dialog.popup_centered(Vector2(460, 300))
@@ -2980,7 +3504,16 @@ func _damage_pve_beast(owner_index: int, slot_index: int, amount: int) -> Dictio
 func _resolve_pve_beast_defeat(owner_index: int, beast_data: Dictionary) -> void:
 	if beast_data.is_empty():
 		return
+	var beast_target_id := _get_beast_target_id(beast_data)
+	if beast_target_id != "beast:":
+		_clear_combat_target_runtime_state(beast_target_id)
 	var beast_name := str(beast_data.get("name", "承道兽"))
+	_queue_combat_event("unit_defeated", {
+		"target_id": beast_target_id,
+		"owner_index": owner_index,
+		"name": beast_name,
+		"unit_type": "beast"
+	})
 	var rank := str(beast_data.get("beast_rank", "ordinary"))
 	var destination := str(beast_data.get("death_destination", "discard"))
 	var should_notify := false
@@ -3017,6 +3550,7 @@ func _resolve_pve_beast_defeat(owner_index: int, beast_data: Dictionary) -> void
 		should_notify = true
 	if should_notify:
 		_notify_chengdao_beast_died(owner_index, beast_data)
+	_drain_combat_events()
 
 
 func _notify_chengdao_beast_died(owner_index: int, beast_data: Dictionary) -> void:
@@ -3120,6 +3654,7 @@ func _check_game_over() -> void:
 	if game_mode == "pve":
 		var player := game_state.players[0]
 		if int(enemy.get("life", 0)) <= 0:
+			_clear_combat_target_runtime_state(_get_enemy_target_id())
 			game_over = true
 			discard_phase = false
 			need_discard = 0
@@ -3130,6 +3665,7 @@ func _check_game_over() -> void:
 			_refresh_all()
 			return
 		if player.life_source <= 0:
+			_clear_combat_target_runtime_state(_get_player_target_id())
 			game_over = true
 			discard_phase = false
 			need_discard = 0
