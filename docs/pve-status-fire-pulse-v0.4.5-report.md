@@ -274,6 +274,17 @@ Additional coverage verifies:
 - restart clears pending/history/status/pulse/beast registry/battlefield
 - restart preserves the 12-card battle deck total
 
+## v0.4.5.2 Lethal Target Stability
+
+v0.4.5.2 separates normal defeated-target skips from invalid target data.
+
+- Attached pulse from a damage effect no longer resolves after that damage has already defeated the target.
+- Follow-up `add_pulse_buildup`, `reduce_pulse_buildup`, and `apply_status` effects on the same card skip normally when their known target has already died during the current card resolution.
+- These defeated-target skips are combat results, not data errors, so they do not call `push_error`.
+- Invalid targets such as empty target data or `ghost` are still rejected before cost payment by the adapter validation path.
+- New tests cover a fire attack that directly kills the player, a lethal damage card with attached fire pulse, and a lethal damage card followed by an independent pulse effect.
+- The in-game help dialog now explains that fire pulse triggers 灼脉 at 10 buildup, preserves overflow, and ticks at the owner side's turn end.
+
 ## Known Limitations
 
 - Only fire pulse is implemented.

@@ -29,6 +29,8 @@ func _ready() -> void:
 		return
 	if not await _test_real_effect_play_paths():
 		return
+	if not await _test_lethal_damage_skips_followup_pulse_and_status():
+		return
 	if not await _test_owner_turn_end_lifecycle_paths():
 		return
 	if not await _test_enemy_fire_intent_execution():
@@ -351,6 +353,88 @@ func _test_real_effect_play_paths() -> bool:
 		return _cleanup_scene_fail(scene, "illegal target should not spend or move hand card")
 	if pulse_runtime.get_buildup(enemy_target, "fire") != 0 or not scene.get("discard_pile").is_empty() or not scene.get("exhaust_pile").is_empty():
 		return _cleanup_scene_fail(scene, "illegal target should not mutate piles or pulse")
+	_cleanup_scene(scene)
+	return true
+
+
+func _test_lethal_damage_skips_followup_pulse_and_status() -> bool:
+	var scene: Node = await _boot_battle_scene()
+	if scene == null:
+		return false
+	var player = scene.get("game_state").players[0]
+	var player_target := str(scene.call("_get_player_target_id"))
+	var enemy_target := str(scene.call("_get_enemy_target_id"))
+	var pulse_runtime = scene.get("pve_pulse_runtime")
+	var status_runtime = scene.get("pve_status_runtime")
+
+	_prepare_scene_for_fire_test(scene, player)
+	player.life_source = 1
+	player.formation_value = 0
+	scene.get("enemy")["intent"] = "fire_attack"
+	scene.get("enemy")["intent_value"] = 5
+	scene.get("enemy")["pulse_value"] = 5
+	scene.get("enemy")["conductive"] = false
+	scene.call("_apply_combat_status", enemy_target, {"status_id": "zhuomai", "stacks": 3})
+	var enemy_life_before := int(scene.get("enemy").get("life", 0))
+	scene.call("_run_enemy_turn", player)
+	if not bool(scene.get("game_over")) or player.life_source > 0:
+		return _cleanup_scene_fail(scene, "lethal fire attack should defeat player")
+	if pulse_runtime.get_buildup(player_target, "fire") != 0:
+		return _cleanup_scene_fail(scene, "lethal fire attack should not add pulse to defeated player")
+	if status_runtime.has_status(player_target, "zhuomai"):
+		return _cleanup_scene_fail(scene, "lethal fire attack should not create zhuomai on defeated player")
+	if int(scene.get("enemy").get("life", 0)) != enemy_life_before:
+		return _cleanup_scene_fail(scene, "enemy owner_turn_end status should not tick after player death")
+	if int(status_runtime.get_status(enemy_target, "zhuomai").get("stacks", 0)) != 3:
+		return _cleanup_scene_fail(scene, "enemy zhuomai should not decay after lethal player hit")
+
+	_prepare_scene_for_fire_test(scene, player)
+	scene.get("enemy")["life"] = 1
+	var lethal_pulse_card := _test_daofa_card("test_lethal_pulse_damage", [{
+		"type": "deal_damage",
+		"value": 5,
+		"target": "enemy",
+		"pulse_id": "fire",
+		"pulse_value": 5,
+		"conductive": false
+	}], "enemy")
+	if not _play_test_card(scene, player, lethal_pulse_card, "enemy"):
+		return _cleanup_scene_fail(scene, "lethal pulse damage card should leave hand")
+	if not bool(scene.get("game_over")) or int(scene.get("enemy").get("life", 0)) > 0:
+		return _cleanup_scene_fail(scene, "lethal pulse damage card should defeat enemy")
+	if pulse_runtime.get_buildup(enemy_target, "fire") != 0:
+		return _cleanup_scene_fail(scene, "lethal pulse damage card should not create enemy pulse")
+	if status_runtime.has_status(enemy_target, "zhuomai"):
+		return _cleanup_scene_fail(scene, "lethal pulse damage card should not create enemy zhuomai")
+	if scene.get("discard_pile").size() != 1 or not scene.get("exhaust_pile").is_empty():
+		return _cleanup_scene_fail(scene, "lethal pulse damage card should resolve into discard only")
+
+	_prepare_scene_for_fire_test(scene, player)
+	scene.get("enemy")["life"] = 1
+	var lethal_followup_card := _test_daofa_card("test_lethal_followup_pulse", [
+		{
+			"type": "deal_damage",
+			"value": 5,
+			"target": "enemy"
+		},
+		{
+			"type": "add_pulse_buildup",
+			"pulse_id": "fire",
+			"value": 5,
+			"target": "enemy"
+		}
+	], "enemy")
+	if not _play_test_card(scene, player, lethal_followup_card, "enemy"):
+		return _cleanup_scene_fail(scene, "lethal followup pulse card should leave hand")
+	if not bool(scene.get("game_over")) or int(scene.get("enemy").get("life", 0)) > 0:
+		return _cleanup_scene_fail(scene, "lethal followup card should defeat enemy")
+	if pulse_runtime.get_buildup(enemy_target, "fire") != 0:
+		return _cleanup_scene_fail(scene, "followup pulse should skip defeated enemy")
+	if status_runtime.has_status(enemy_target, "zhuomai"):
+		return _cleanup_scene_fail(scene, "followup pulse should not create zhuomai on defeated enemy")
+	if scene.get("discard_pile").size() != 1 or not scene.get("exhaust_pile").is_empty():
+		return _cleanup_scene_fail(scene, "lethal followup card should resolve into discard only")
+
 	_cleanup_scene(scene)
 	return true
 

@@ -1552,12 +1552,18 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 				_log("【%s】回潮值 -%d，当前回潮值 %d。" % [card_name, value, _get_return_tide(player)])
 			"add_pulse_buildup":
 				var pulse_target_id := _resolve_effect_target_id(effect, player)
+				if _should_skip_effect_for_defeated_target(pulse_target_id, "火脉积蓄"):
+					continue
 				_apply_pulse_buildup(pulse_target_id, str(effect.get("pulse_id", "")), value, source_id)
 			"reduce_pulse_buildup":
 				var reduce_target_id := _resolve_effect_target_id(effect, player)
+				if _should_skip_effect_for_defeated_target(reduce_target_id, "火脉削减"):
+					continue
 				_reduce_pulse_buildup(reduce_target_id, str(effect.get("pulse_id", "")), value, source_id)
 			"apply_status":
 				var status_target_id := _resolve_effect_target_id(effect, player)
+				if _should_skip_effect_for_defeated_target(status_target_id, "状态施加"):
+					continue
 				var status_stacks := int(effect.get("stacks", 0))
 				var applied := _apply_combat_status(status_target_id, {
 					"status_id": str(effect.get("status_id", "")),
@@ -1907,6 +1913,9 @@ func _calculate_attack_pulse_amount(base_buildup: int, damage_result: Dictionary
 func _apply_attack_pulse_from_damage(target_id: String, effect: Dictionary, damage_result: Dictionary, source_id: String) -> void:
 	if not effect.has("pulse_id") and not effect.has("pulse_value"):
 		return
+	if bool(damage_result.get("target_defeated", false)):
+		_log("目标已经被击败，附带火脉不再结算。")
+		return
 	var pulse_id := str(effect.get("pulse_id", ""))
 	var base_buildup := int(effect.get("pulse_value", 0))
 	if pulse_id == "" or base_buildup <= 0:
@@ -1923,7 +1932,11 @@ func _apply_attack_pulse_from_damage(target_id: String, effect: Dictionary, dama
 func _apply_pulse_buildup(target_id: String, pulse_id: String, amount: int, source_id: String = "") -> Dictionary:
 	if pve_pulse_runtime == null:
 		return {"ok": false, "reason": "脉冲运行时未初始化。"}
-	if not _can_apply_runtime_to_target(target_id):
+	var skip_reason := _defeated_target_skip_message(target_id, "火脉积蓄")
+	if skip_reason != "":
+		_log(skip_reason)
+		return {"ok": false, "reason": skip_reason}
+	if not _is_known_combat_target_id(target_id):
 		var reason := "无法增加火脉：目标无效或已死亡。target_id=%s" % target_id
 		push_error("[BattleScene] %s" % reason)
 		_log(reason)
@@ -1955,7 +1968,11 @@ func _apply_pulse_buildup(target_id: String, pulse_id: String, amount: int, sour
 func _reduce_pulse_buildup(target_id: String, pulse_id: String, amount: int, source_id: String = "") -> Dictionary:
 	if pve_pulse_runtime == null:
 		return {"ok": false, "reason": "脉冲运行时未初始化。"}
-	if not _can_apply_runtime_to_target(target_id):
+	var skip_reason := _defeated_target_skip_message(target_id, "火脉削减")
+	if skip_reason != "":
+		_log(skip_reason)
+		return {"ok": false, "reason": skip_reason}
+	if not _is_known_combat_target_id(target_id):
 		var reason := "无法减少火脉：目标无效或已死亡。target_id=%s" % target_id
 		push_error("[BattleScene] %s" % reason)
 		_log(reason)
@@ -1994,7 +2011,11 @@ func _apply_fire_break_status(target_id: String, source_id: String = "") -> void
 func _apply_combat_status(target_id: String, status_spec: Dictionary) -> Dictionary:
 	if pve_status_runtime == null:
 		return {}
-	if not _can_apply_runtime_to_target(target_id):
+	var skip_reason := _defeated_target_skip_message(target_id, "状态施加")
+	if skip_reason != "":
+		_log(skip_reason)
+		return {}
+	if not _is_known_combat_target_id(target_id):
 		var reason := "无法施加状态：目标无效或已死亡。target_id=%s" % target_id
 		push_error("[BattleScene] %s" % reason)
 		_log(reason)
@@ -2035,6 +2056,28 @@ func _normalize_combat_status_spec(status_spec: Dictionary) -> Dictionary:
 
 func _can_apply_runtime_to_target(target_id: String) -> bool:
 	return target_id != "" and _is_target_alive(target_id)
+
+
+func _is_known_combat_target_id(target_id: String) -> bool:
+	if target_id == _get_player_target_id() or target_id == _get_enemy_target_id():
+		return true
+	if target_id.begins_with("beast:"):
+		return bool(_find_beast_slot_by_target_id(target_id).get("ok", false))
+	return false
+
+
+func _defeated_target_skip_message(target_id: String, effect_name: String) -> String:
+	if _is_known_combat_target_id(target_id) and not _is_target_alive(target_id):
+		return "目标已失效，【%s】未能生效。" % effect_name
+	return ""
+
+
+func _should_skip_effect_for_defeated_target(target_id: String, effect_name: String) -> bool:
+	var message := _defeated_target_skip_message(target_id, effect_name)
+	if message == "":
+		return false
+	_log(message)
+	return true
 
 
 func _queue_combat_event(event_type: String, payload: Dictionary = {}, parent_event_id: String = "") -> Dictionary:
@@ -3065,7 +3108,7 @@ func _on_help_pressed() -> void:
 	var label := Label.new()
 	label.custom_minimum_size = Vector2(420, 220)
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	label.text = "1. 道主牌不是手牌。\n2. 道主牌不进入承道位。\n3. 点击底部分类手牌选择卡牌。\n4. 持续牌点击中央战场区打出。\n5. 道法牌点击顶部敌人目标。\n6. 点击中央战场区己方承道兽选择攻击者，再点击敌人目标。\n7. 玩家回合开始固定抽 5 张，手牌上限 10。\n8. 结束回合会自动弃置非凝梦 / 保留手牌。"
+	label.text = "1. 道主牌不是手牌。\n2. 道主牌不进入承道位。\n3. 点击底部分类手牌选择卡牌。\n4. 持续牌点击中央战场区打出。\n5. 道法牌点击顶部敌人目标。\n6. 点击中央战场区己方承道兽选择攻击者，再点击敌人目标。\n7. 玩家回合开始固定抽 5 张，手牌上限 10。\n8. 结束回合会自动弃置非凝梦 / 保留手牌。\n9. 火脉积蓄达到 10 时会触发灼脉，超过阈值的积蓄会保留。\n10. 灼脉会在目标所属阵营回合结束时造成伤害，然后减少 1 层。"
 	dialog.add_child(label)
 	add_child(dialog)
 	dialog.popup_centered(Vector2(460, 300))
