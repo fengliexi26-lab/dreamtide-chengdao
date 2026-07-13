@@ -8,8 +8,13 @@ const SUPPORTED_PHASE1_EFFECTS := {
 	"gain_daoxi": true,
 	"gain_reflux": true,
 	"reduce_reflux": true,
-	"summon": true
+	"summon": true,
+	"add_pulse_buildup": true,
+	"reduce_pulse_buildup": true,
+	"apply_status": true
 }
+
+const PULSE_FIRE := "fire"
 
 const KEYWORD_RETAIN := "凝梦"
 const KEYWORD_EXHAUST := "消耗"
@@ -152,6 +157,16 @@ func get_validation_errors(card: Dictionary) -> Array:
 			for error in summon_errors:
 				errors.append("effect %d %s" % [index, error])
 			continue
+		if effect_type == "apply_status":
+			var status_errors := _validate_apply_status_effect(effect)
+			for error in status_errors:
+				errors.append("effect %d %s" % [index, error])
+			continue
+		if effect_type == "add_pulse_buildup" or effect_type == "reduce_pulse_buildup":
+			var pulse_effect_errors := _validate_pulse_effect(effect)
+			for error in pulse_effect_errors:
+				errors.append("effect %d %s" % [index, error])
+			continue
 		if not effect.has("value"):
 			errors.append("effect %d missing value" % index)
 			continue
@@ -160,6 +175,9 @@ func get_validation_errors(card: Dictionary) -> Array:
 			errors.append("effect %d value must be a non-negative integer number" % index)
 		elif int(value) < 0:
 			errors.append("effect %d value must not be negative" % index)
+		var pulse_errors := _validate_deal_damage_pulse_fields(effect)
+		for error in pulse_errors:
+			errors.append("effect %d %s" % [index, error])
 
 	if str(card.get("card_type", "")) == "chengdao":
 		var summon_errors := _validate_summon_source(card.get("summon_data", {}))
@@ -206,6 +224,53 @@ func _validate_summon_source(source) -> Array:
 		errors.append("life must be positive")
 	if source.has("dao_tags") and typeof(source.get("dao_tags")) != TYPE_ARRAY:
 		errors.append("dao_tags must be array")
+	return errors
+
+
+func _validate_pulse_effect(effect: Dictionary) -> Array:
+	var errors: Array = []
+	if not effect.has("target") or str(effect.get("target", "")) == "":
+		errors.append("missing target")
+	if not effect.has("pulse_id"):
+		errors.append("missing pulse_id")
+	elif str(effect.get("pulse_id", "")) != PULSE_FIRE:
+		errors.append("unsupported pulse_id: %s" % str(effect.get("pulse_id", "")))
+	if not effect.has("value"):
+		errors.append("missing value")
+	elif not _is_non_negative_integer_number(effect.get("value")):
+		errors.append("value must be a non-negative integer number")
+	return errors
+
+
+func _validate_apply_status_effect(effect: Dictionary) -> Array:
+	var errors: Array = []
+	if not effect.has("target") or str(effect.get("target", "")) == "":
+		errors.append("missing target")
+	if not effect.has("status_id") or str(effect.get("status_id", "")) == "":
+		errors.append("missing status_id")
+	if not effect.has("stacks"):
+		errors.append("missing stacks")
+	elif not _is_positive_integer_number(effect.get("stacks")):
+		errors.append("stacks must be a positive integer number")
+	return errors
+
+
+func _validate_deal_damage_pulse_fields(effect: Dictionary) -> Array:
+	var errors: Array = []
+	var has_pulse_id := effect.has("pulse_id")
+	var has_pulse_value := effect.has("pulse_value")
+	if not has_pulse_id and not has_pulse_value:
+		return errors
+	if not has_pulse_id:
+		errors.append("missing pulse_id")
+	elif str(effect.get("pulse_id", "")) != PULSE_FIRE:
+		errors.append("unsupported pulse_id: %s" % str(effect.get("pulse_id", "")))
+	if not has_pulse_value:
+		errors.append("missing pulse_value")
+	elif not _is_non_negative_integer_number(effect.get("pulse_value")):
+		errors.append("pulse_value must be a non-negative integer number")
+	if effect.has("conductive") and typeof(effect.get("conductive")) != TYPE_BOOL:
+		errors.append("conductive must be bool")
 	return errors
 
 
