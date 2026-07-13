@@ -1558,10 +1558,11 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 				_reduce_pulse_buildup(reduce_target_id, str(effect.get("pulse_id", "")), value, source_id)
 			"apply_status":
 				var status_target_id := _resolve_effect_target_id(effect, player)
+				var status_stacks := int(effect.get("stacks", 0))
 				var applied := _apply_combat_status(status_target_id, {
 					"status_id": str(effect.get("status_id", "")),
 					"display_name": str(effect.get("display_name", effect.get("status_id", ""))),
-					"stacks": value,
+					"stacks": status_stacks,
 					"max_stacks": int(effect.get("max_stacks", 0)),
 					"tick_timing": str(effect.get("tick_timing", "owner_turn_end")),
 					"source_id": source_id,
@@ -1571,7 +1572,7 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 					_log("%s获得%s %d 层，当前 %d 层。" % [
 						_target_display_name(status_target_id),
 						str(applied.get("display_name", applied.get("status_id", "状态"))),
-						value,
+						status_stacks,
 						int(applied.get("stacks", 0))
 					])
 			"summon":
@@ -1596,13 +1597,15 @@ func _validate_v1_target_and_capacity(card: Dictionary, target_mode: String, sum
 	var unsupported: Array = pve_effect_adapter.get_unsupported_effect_types(card)
 	if not unsupported.is_empty():
 		return "暂未支持该 v1 效果：%s" % str(unsupported)
-	var has_damage: bool = not pve_effect_adapter.get_effects_by_type(card, "deal_damage").is_empty()
-	if has_damage and target_mode != "enemy":
+	var target_profile := _get_v1_effect_target_profile(card)
+	if not bool(target_profile.get("valid", false)):
+		return str(target_profile.get("reason", "v1 效果目标不合法。"))
+	var requires_enemy_selection := bool(target_profile.get("requires_enemy_selection", false))
+	if requires_enemy_selection and target_mode != "enemy":
 		return "道法牌需要选择敌人目标。"
-	var has_self_effect: bool = _v1_has_non_damage_effect(card)
-	if target_mode == "enemy" and not has_damage:
+	if target_mode == "enemy" and not requires_enemy_selection:
 		return "该牌不需要选择敌人目标。"
-	if target_mode == "self" and not has_self_effect and not _v1_has_summon_effect(card):
+	if target_mode == "self" and requires_enemy_selection:
 		return "该牌需要选择敌人目标。"
 	if _v1_has_summon_effect(card):
 		if summon_plan.is_empty():
@@ -1613,19 +1616,56 @@ func _validate_v1_target_and_capacity(card: Dictionary, target_mode: String, sum
 
 
 func _v1_card_can_play_on_self(card: Dictionary) -> bool:
+	var target_profile := _get_v1_effect_target_profile(card)
+	return bool(target_profile.get("valid", false)) and not bool(target_profile.get("requires_enemy_selection", false))
+
+
+func _get_v1_effect_target_profile(card: Dictionary) -> Dictionary:
+	var result := {
+		"has_enemy_effect": false,
+		"has_self_effect": false,
+		"requires_enemy_selection": false,
+		"valid": true,
+		"reason": ""
+	}
 	if pve_effect_adapter == null:
-		return false
+		result.valid = false
+		result.reason = "v1 效果适配器未初始化。"
+		return result
 	for effect in pve_effect_adapter.get_effects(card):
 		if typeof(effect) != TYPE_DICTIONARY:
 			continue
 		var effect_dict: Dictionary = effect
 		var effect_type := str(effect_dict.get("type", ""))
 		var target := str(effect_dict.get("target", ""))
-		if target == "enemy":
-			return false
-		if target == "" and effect_type in ["deal_damage", "add_pulse_buildup", "apply_status"]:
-			return false
-	return true
+		if target == "":
+			result.valid = false
+			result.reason = "v1 效果缺少 target。"
+			return result
+		var is_enemy_effect := false
+		var is_self_effect := false
+		match effect_type:
+			"deal_damage":
+				is_enemy_effect = target == "enemy"
+			"add_pulse_buildup", "reduce_pulse_buildup", "apply_status":
+				is_enemy_effect = target == "enemy"
+				is_self_effect = target == "self" or target == "player"
+			"gain_formation", "draw", "gain_daoxi", "gain_reflux", "reduce_reflux", "summon":
+				is_self_effect = target == "self" or target == "player"
+			_:
+				result.valid = false
+				result.reason = "暂未支持该 v1 效果：%s。" % effect_type
+				return result
+		if not is_enemy_effect and not is_self_effect:
+			result.valid = false
+			result.reason = "v1 效果 target 不合法：%s -> %s。" % [effect_type, target]
+			return result
+		if is_enemy_effect:
+			result.has_enemy_effect = true
+		if is_self_effect:
+			result.has_self_effect = true
+	result.requires_enemy_selection = bool(result.get("has_enemy_effect", false))
+	return result
 
 
 func _v1_has_non_damage_effect(card: Dictionary) -> bool:
@@ -1883,6 +1923,11 @@ func _apply_attack_pulse_from_damage(target_id: String, effect: Dictionary, dama
 func _apply_pulse_buildup(target_id: String, pulse_id: String, amount: int, source_id: String = "") -> Dictionary:
 	if pve_pulse_runtime == null:
 		return {"ok": false, "reason": "脉冲运行时未初始化。"}
+	if not _can_apply_runtime_to_target(target_id):
+		var reason := "无法增加火脉：目标无效或已死亡。target_id=%s" % target_id
+		push_error("[BattleScene] %s" % reason)
+		_log(reason)
+		return {"ok": false, "reason": reason}
 	var result: Dictionary = pve_pulse_runtime.add_buildup(target_id, pulse_id, amount)
 	if not bool(result.get("ok", false)):
 		_log(str(result.get("reason", "火脉积蓄失败。")))
@@ -1910,6 +1955,11 @@ func _apply_pulse_buildup(target_id: String, pulse_id: String, amount: int, sour
 func _reduce_pulse_buildup(target_id: String, pulse_id: String, amount: int, source_id: String = "") -> Dictionary:
 	if pve_pulse_runtime == null:
 		return {"ok": false, "reason": "脉冲运行时未初始化。"}
+	if not _can_apply_runtime_to_target(target_id):
+		var reason := "无法减少火脉：目标无效或已死亡。target_id=%s" % target_id
+		push_error("[BattleScene] %s" % reason)
+		_log(reason)
+		return {"ok": false, "reason": reason}
 	var result: Dictionary = pve_pulse_runtime.reduce_buildup(target_id, pulse_id, amount)
 	if bool(result.get("ok", false)):
 		_queue_combat_event("pulse_buildup_reduced", {
@@ -1930,12 +1980,9 @@ func _apply_fire_break_status(target_id: String, source_id: String = "") -> void
 	var stacks := 2 if not current.is_empty() else 3
 	var status := _apply_combat_status(target_id, {
 		"status_id": "zhuomai",
-		"display_name": "灼脉",
 		"stacks": stacks,
-		"max_stacks": 6,
-		"tick_timing": "owner_turn_end",
 		"source_id": source_id,
-		"tags": ["fire", "burning"]
+		"tags": ["pulse", "fire", "damage_over_time"]
 	})
 	_log("火脉失衡：%s获得灼脉 %d，当前灼脉 %d。" % [
 		_target_display_name(target_id),
@@ -1947,17 +1994,47 @@ func _apply_fire_break_status(target_id: String, source_id: String = "") -> void
 func _apply_combat_status(target_id: String, status_spec: Dictionary) -> Dictionary:
 	if pve_status_runtime == null:
 		return {}
-	var apply_result: Dictionary = pve_status_runtime.apply_status(target_id, status_spec)
+	if not _can_apply_runtime_to_target(target_id):
+		var reason := "无法施加状态：目标无效或已死亡。target_id=%s" % target_id
+		push_error("[BattleScene] %s" % reason)
+		_log(reason)
+		return {}
+	var normalized_spec := _normalize_combat_status_spec(status_spec)
+	var apply_result: Dictionary = pve_status_runtime.apply_status(target_id, normalized_spec)
 	var status: Dictionary = apply_result.get("status", {})
 	if not status.is_empty():
 		_queue_combat_event("status_applied", {
 			"target_id": target_id,
 			"status_id": str(status.get("status_id", "")),
 			"stacks": int(status.get("stacks", 0)),
-			"source_id": str(status_spec.get("source_id", ""))
+			"source_id": str(normalized_spec.get("source_id", ""))
 		})
 		_drain_combat_events()
 	return status
+
+
+func _normalize_combat_status_spec(status_spec: Dictionary) -> Dictionary:
+	var normalized := status_spec.duplicate(true)
+	var status_id := str(normalized.get("status_id", ""))
+	if status_id == "zhuomai":
+		normalized["status_id"] = "zhuomai"
+		normalized["display_name"] = "灼脉"
+		normalized["max_stacks"] = 6
+		normalized["duration"] = -1
+		normalized["tick_timing"] = "owner_turn_end"
+		normalized["visible"] = true
+		var tags: Array = []
+		if typeof(normalized.get("tags", [])) == TYPE_ARRAY:
+			tags = normalized.get("tags", []).duplicate(true)
+		for required_tag in ["pulse", "fire", "damage_over_time"]:
+			if not tags.has(required_tag):
+				tags.append(required_tag)
+		normalized["tags"] = tags
+	return normalized
+
+
+func _can_apply_runtime_to_target(target_id: String) -> bool:
+	return target_id != "" and _is_target_alive(target_id)
 
 
 func _queue_combat_event(event_type: String, payload: Dictionary = {}, parent_event_id: String = "") -> Dictionary:
@@ -1994,7 +2071,7 @@ func _resolve_effect_target_id(effect: Dictionary, _player: PlayerState) -> Stri
 		return _get_player_target_id()
 	if target == "enemy":
 		return _get_enemy_target_id()
-	return target
+	return ""
 
 
 func _find_beast_slot_by_target_id(target_id: String) -> Dictionary:
@@ -2284,10 +2361,13 @@ func _run_enemy_turn(player: PlayerState) -> void:
 			int(damage_result.get("life_damage", 0))
 		])
 		if intent == "fire_attack":
+			var intent_pulse_id := str(enemy.get("pulse_id", "fire"))
+			if intent_pulse_id == "":
+				intent_pulse_id = "fire"
 			_apply_attack_pulse_from_damage(
 				_get_player_target_id(),
 				{
-					"pulse_id": str(enemy.get("pulse_id", "fire")),
+					"pulse_id": intent_pulse_id,
 					"pulse_value": int(enemy.get("pulse_value", 0)),
 					"conductive": bool(enemy.get("conductive", false))
 				},
@@ -2299,6 +2379,9 @@ func _run_enemy_turn(player: PlayerState) -> void:
 		_log("%s蓄势，获得 %d 点护盾。" % [str(enemy.get("name", "敌人")), value])
 	else:
 		_log("%s暂时观望。" % str(enemy.get("name", "敌人")))
+	_check_game_over()
+	if game_over:
+		return
 	_process_owner_turn_end_statuses("enemy")
 	if game_over:
 		return
@@ -2614,7 +2697,8 @@ func _enemy_intent_text() -> String:
 	if intent == "attack":
 		return "攻击 %d" % value
 	if intent == "fire_attack":
-		return "灼脉攻击 %d｜火脉积蓄 %d｜非传导" % [value, int(enemy.get("pulse_value", 0))]
+		var conductive_text := "传导" if bool(enemy.get("conductive", false)) else "非传导"
+		return "火脉攻击 %d｜火脉积蓄 %d｜%s" % [value, int(enemy.get("pulse_value", 0)), conductive_text]
 	if intent == "buff":
 		return "蓄势 +%d 护盾" % value
 	if intent == "wait":

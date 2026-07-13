@@ -15,6 +15,9 @@ const SUPPORTED_PHASE1_EFFECTS := {
 }
 
 const PULSE_FIRE := "fire"
+const TARGET_ENEMY := "enemy"
+const TARGET_SELF := "self"
+const TARGET_PLAYER := "player"
 
 const KEYWORD_RETAIN := "凝梦"
 const KEYWORD_EXHAUST := "消耗"
@@ -153,6 +156,9 @@ func get_validation_errors(card: Dictionary) -> Array:
 			errors.append("effect %d unsupported type: %s" % [index, effect_type])
 			continue
 		if effect_type == "summon":
+			var target_errors := _validate_effect_target(effect, [TARGET_SELF])
+			for error in target_errors:
+				errors.append("effect %d %s" % [index, error])
 			var summon_errors := _validate_summon_source(effect)
 			for error in summon_errors:
 				errors.append("effect %d %s" % [index, error])
@@ -167,6 +173,12 @@ func get_validation_errors(card: Dictionary) -> Array:
 			for error in pulse_effect_errors:
 				errors.append("effect %d %s" % [index, error])
 			continue
+		var allowed_targets := [TARGET_SELF, TARGET_PLAYER]
+		if effect_type == "deal_damage":
+			allowed_targets = [TARGET_ENEMY]
+		var target_errors := _validate_effect_target(effect, allowed_targets)
+		for error in target_errors:
+			errors.append("effect %d %s" % [index, error])
 		if not effect.has("value"):
 			errors.append("effect %d missing value" % index)
 			continue
@@ -229,8 +241,8 @@ func _validate_summon_source(source) -> Array:
 
 func _validate_pulse_effect(effect: Dictionary) -> Array:
 	var errors: Array = []
-	if not effect.has("target") or str(effect.get("target", "")) == "":
-		errors.append("missing target")
+	for error in _validate_effect_target(effect, [TARGET_ENEMY, TARGET_SELF, TARGET_PLAYER]):
+		errors.append(error)
 	if not effect.has("pulse_id"):
 		errors.append("missing pulse_id")
 	elif str(effect.get("pulse_id", "")) != PULSE_FIRE:
@@ -244,14 +256,25 @@ func _validate_pulse_effect(effect: Dictionary) -> Array:
 
 func _validate_apply_status_effect(effect: Dictionary) -> Array:
 	var errors: Array = []
-	if not effect.has("target") or str(effect.get("target", "")) == "":
-		errors.append("missing target")
+	for error in _validate_effect_target(effect, [TARGET_ENEMY, TARGET_SELF, TARGET_PLAYER]):
+		errors.append(error)
 	if not effect.has("status_id") or str(effect.get("status_id", "")) == "":
 		errors.append("missing status_id")
 	if not effect.has("stacks"):
 		errors.append("missing stacks")
 	elif not _is_positive_integer_number(effect.get("stacks")):
 		errors.append("stacks must be a positive integer number")
+	return errors
+
+
+func _validate_effect_target(effect: Dictionary, allowed_targets: Array) -> Array:
+	var errors: Array = []
+	if not effect.has("target") or str(effect.get("target", "")) == "":
+		errors.append("missing target")
+		return errors
+	var target := str(effect.get("target", ""))
+	if not allowed_targets.has(target):
+		errors.append("unsupported target: %s" % target)
 	return errors
 
 

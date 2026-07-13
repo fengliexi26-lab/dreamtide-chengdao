@@ -150,6 +150,130 @@ Coverage includes:
 - enemy fire intent
 - restart isolation
 
+## v0.4.5.1 Hardening
+
+v0.4.5.1 fixes and verifies the first fire/status integration beyond helper-only tests.
+
+### Effect Value Rules
+
+- `deal_damage` continues to read `value`.
+- `add_pulse_buildup` continues to read `value`.
+- `reduce_pulse_buildup` continues to read `value`.
+- `apply_status` now reads `stacks`, not `value`.
+
+Real BattleScene card-play tests verify that an `apply_status` effect with:
+
+```json
+{"type": "apply_status", "status_id": "zhuomai", "stacks": 2, "target": "enemy"}
+```
+
+actually applies 2 stacks of `zhuomai` / 灼脉.
+
+### V1 Effect Target Profile
+
+BattleScene now uses a unified V1 effect target profile:
+
+- enemy effects require the enemy target button
+- self-only effects use the central battlefield entry
+- mixed enemy/self cards use the enemy target button
+- self effects on a mixed card still resolve on the player
+
+Enemy effects:
+
+- `deal_damage target=enemy`
+- `add_pulse_buildup target=enemy`
+- `reduce_pulse_buildup target=enemy`
+- `apply_status target=enemy`
+
+Self effects:
+
+- `gain_formation`
+- `draw`
+- `gain_daoxi`
+- `gain_reflux`
+- `reduce_reflux`
+- `summon`
+- `add_pulse_buildup target=self/player`
+- `reduce_pulse_buildup target=self/player`
+- `apply_status target=self/player`
+
+Adapter validation accepts only:
+
+- `enemy`
+- `self`
+- `player`
+
+Invalid targets such as `ghost` are rejected before cost payment, card movement, pile movement, status mutation, or pulse mutation.
+
+### Zhuomai Standardization
+
+All direct and fire-break status application paths normalize `zhuomai` / 灼脉:
+
+- `status_id = "zhuomai"`
+- `display_name = "灼脉"`
+- `max_stacks = 6`
+- `duration = -1`
+- `tick_timing = "owner_turn_end"`
+- `visible = true`
+- `tags` includes `pulse`, `fire`, `damage_over_time`
+
+Repeated application clamps stacks to 6.
+
+### Enemy Fire Intent
+
+Enemy `fire_attack` now displays fire pulse wording, not burning wording:
+
+- `火脉攻击 X｜火脉积蓄 Y｜非传导`
+- `火脉攻击 X｜火脉积蓄 Y｜传导`
+
+The conductive text is dynamic.
+
+If `fire_attack` has an empty `pulse_id`, BattleScene normalizes it to `fire` during execution.
+
+### Lethal Ordering
+
+Enemy attack resolution now checks game-over immediately after attack damage and its attached fire pulse.
+
+If the player dies from the attack:
+
+- the enemy turn ends immediately
+- enemy owner-turn-end burning does not tick
+- no new player turn starts
+
+Normal enemy owner-turn-end burning only resolves when the player survived the enemy action.
+
+### Real Card-Play Integration Tests
+
+`TestPveStatusFirePulse.gd` now verifies real BattleScene card-play paths using synthetic V1 cards in the actual hand and selected-card flow:
+
+- pure enemy `add_pulse_buildup`
+- pure self `reduce_pulse_buildup`
+- `apply_status` with `stacks`
+- mixed `deal_damage enemy` plus `gain_formation self`
+- illegal `target=ghost`
+
+### Lifecycle Tests
+
+The test suite also verifies:
+
+- an ordinary V1 beast killed by 灼脉 returns the same source card object to discard
+- beast status and pulse runtime data clear on death
+- `songgui` notification triggers once
+- owner-turn-end beast status ticks follow stable slot order
+- burning damage does not add fire pulse or trigger another pulse break
+- player burning death blocks enemy action
+- enemy burning death blocks the next player turn
+- enemy direct lethal attack blocks enemy self-burning tick
+
+### Event Queue / Restart Tests
+
+Additional coverage verifies:
+
+- max events per drain guard stops at 256
+- reset clears pending events, history, and processing state
+- restart clears pending/history/status/pulse/beast registry/battlefield
+- restart preserves the 12-card battle deck total
+
 ## Known Limitations
 
 - Only fire pulse is implemented.
