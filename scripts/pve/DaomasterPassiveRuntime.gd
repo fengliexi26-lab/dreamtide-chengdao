@@ -61,6 +61,8 @@ func on_player_turn_end() -> void:
 		return
 	battle_scene.gain_formation(gained, "留宵", false)
 	battle_scene._log("留宵：因保留 %d 张凝梦牌，获得 %d 点阵势。" % [retain_count, gained])
+	if gained >= 2 and battle_scene.has_method("_on_daomaster_power_source"):
+		battle_scene._on_daomaster_power_source("liuxiao")
 
 
 func on_formation_gained(amount: int, source: String) -> void:
@@ -71,11 +73,15 @@ func on_formation_gained(amount: int, source: String) -> void:
 	hengjie_used_this_turn = true
 	battle_scene.gain_formation(2, "衡界", false)
 	battle_scene._log("衡界：额外获得 2 点阵势。")
+	if battle_scene.has_method("_on_daomaster_power_source"):
+		battle_scene._on_daomaster_power_source("hengjie")
 
 
 func on_chengdao_beast_died(beast_data: Dictionary) -> void:
 	if passive_id != "songgui":
 		return
+	if battle_scene != null and battle_scene.has_method("_on_daomaster_power_source"):
+		battle_scene._on_daomaster_power_source("chengdao_death")
 	if songgui_triggered_this_battle:
 		return
 	songgui_triggered_this_battle = true

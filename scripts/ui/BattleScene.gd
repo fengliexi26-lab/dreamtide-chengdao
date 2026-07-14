@@ -12,6 +12,7 @@ const PveBeastRuntimeScript = preload("res://scripts/pve/PveBeastRuntime.gd")
 const PveCombatEventQueueScript = preload("res://scripts/pve/PveCombatEventQueue.gd")
 const PveStatusRuntimeScript = preload("res://scripts/pve/PveStatusRuntime.gd")
 const PvePulseRuntimeScript = preload("res://scripts/pve/PvePulseRuntime.gd")
+const PveDaomasterActiveRuntimeScript = preload("res://scripts/pve/PveDaomasterActiveRuntime.gd")
 const MAIN_DECK_SIZE := 40
 const SIDE_DECK_SIZE := 15
 const HAND_LIMIT := 10
@@ -73,11 +74,14 @@ var pve_beast_runtime
 var pve_event_queue
 var pve_status_runtime
 var pve_pulse_runtime
+var daomaster_active_runtime
 var pve_card_data_mode := "legacy_fallback"
 var pve_card_fallback_reason := ""
 var extra_stats := {}
 var active_dao_masters: Dictionary = {}
 var dao_strike_used := {}
+var daomaster_active_target_mode := ""
+var is_resolving_v1_card := false
 var discard_phase := false
 var need_discard := 0
 var discard_phase_player_id := ""
@@ -248,7 +252,7 @@ func _build_opponent_area() -> Control:
 		enemy_target_button = Button.new()
 		enemy_target_button.text = "敌人目标"
 		enemy_target_button.custom_minimum_size = Vector2(120, 0)
-		enemy_target_button.tooltip_text = "道法、承道兽攻击和道主道击可以指向这里"
+		enemy_target_button.tooltip_text = "道法和承道兽攻击可以指向这里"
 		_apply_button_style(enemy_target_button, opponent_card_style)
 		enemy_target_button.pressed.connect(_on_enemy_target_pressed)
 		enemy_row.add_child(enemy_target_button)
@@ -561,6 +565,8 @@ func _start_pve_battle() -> void:
 	selected_card_view = null
 	selected_card_source = ""
 	selected_attacker = {"player_index": -1, "slot_index": -1}
+	daomaster_active_target_mode = ""
+	is_resolving_v1_card = false
 	discard_phase = false
 	need_discard = 0
 	discard_phase_player_id = ""
@@ -590,6 +596,7 @@ func _start_pve_battle() -> void:
 	pve_status_runtime.reset()
 	pve_pulse_runtime = PvePulseRuntimeScript.new()
 	pve_pulse_runtime.reset()
+	daomaster_active_runtime = null
 	pve_card_data_mode = "legacy_fallback"
 	pve_card_fallback_reason = ""
 	var run_state = RunStateScript.get_current()
@@ -635,6 +642,10 @@ func _start_pve_battle() -> void:
 	else:
 		passive_runtime.setup_fallback(self, "hengjie", "衡界", "每个玩家回合第一次获得阵势时，额外获得 2 点阵势。")
 	passive_runtime.reset_for_battle()
+	if use_v1_run:
+		daomaster_active_runtime = PveDaomasterActiveRuntimeScript.new()
+		daomaster_active_runtime.setup(str(run_state.selected_daomaster_id), str(run_state.selected_passive_id), str(run_state.selected_daomaster_title))
+		daomaster_active_runtime.reset_for_battle()
 	var enemy_dummy := PlayerState.new("enemy_dummy", "敌人", Realm.Rank.HUANG_RANG, [])
 	enemy_dummy.max_life_source = 80
 	enemy_dummy.life_source = 80
@@ -1049,6 +1060,193 @@ func gain_formation(amount: int, source: String = "", allow_passive: bool = true
 	return amount
 
 
+func _is_normal_v1_pve() -> bool:
+	return game_mode == "pve" and pve_card_data_mode == "pve_v1" and daomaster_active_runtime != null
+
+
+func _on_daomaster_power_source(source_id: String) -> Dictionary:
+	if not _is_normal_v1_pve():
+		return {"ok": false, "reason": "道主主动运行时未启用。"}
+	var before: int = daomaster_active_runtime.get_power()
+	var result: Dictionary = daomaster_active_runtime.try_gain_power(source_id)
+	if bool(result.get("ok", false)):
+		_log("道主势 +1：%d / %d（来源：%s）。" % [
+			daomaster_active_runtime.get_power(),
+			daomaster_active_runtime.get_max_power(),
+			source_id
+		])
+		_queue_combat_event("daomaster_power_gained", {
+			"daomaster_id": str(daomaster_active_runtime.daomaster_id),
+			"source_id": source_id,
+			"before": before,
+			"after": daomaster_active_runtime.get_power()
+		})
+		_refresh_all()
+	return result
+
+
+func _active_block_reason() -> String:
+	if game_over:
+		return _game_over_action_message()
+	if not _is_normal_v1_pve():
+		return ""
+	if is_resolving_v1_card:
+		return "卡牌正在结算，暂不能发动主动技能。"
+	if pve_event_queue != null and pve_event_queue.is_processing():
+		return "事件队列正在处理，暂不能发动主动技能。"
+	var spend_check: Dictionary = daomaster_active_runtime.can_spend_for_active()
+	if not bool(spend_check.get("ok", false)):
+		return str(spend_check.get("reason", "暂不能发动主动技能。"))
+	var skill_id: String = daomaster_active_runtime.get_skill_id()
+	if skill_id == PveDaomasterActiveRuntimeScript.SKILL_YEFU_CANSHI:
+		return str(daomaster_active_runtime.can_use_yefu(_player_fire_buildup()).get("reason", "")) if not bool(daomaster_active_runtime.can_use_yefu(_player_fire_buildup()).get("ok", false)) else ""
+	if skill_id == PveDaomasterActiveRuntimeScript.SKILL_FUGUAN_DAISHOU:
+		return str(daomaster_active_runtime.can_use_fuguan(_player_fire_buildup(), _has_own_beast()).get("reason", "")) if not bool(daomaster_active_runtime.can_use_fuguan(_player_fire_buildup(), _has_own_beast()).get("ok", false)) else ""
+	return ""
+
+
+func _player_fire_buildup() -> int:
+	if pve_pulse_runtime == null:
+		return 0
+	return pve_pulse_runtime.get_buildup(_get_player_target_id(), "fire")
+
+
+func _has_own_beast() -> bool:
+	if game_state == null or player_boards.is_empty():
+		return false
+	for i in range(_slot_count(CardTypes.CHENGDAO)):
+		if not player_boards[0].get_card(CardTypes.CHENGDAO, i).is_empty():
+			return true
+	return false
+
+
+func _spend_daomaster_active() -> Dictionary:
+	var before: int = daomaster_active_runtime.get_power()
+	var spend_result: Dictionary = daomaster_active_runtime.spend_for_active()
+	if bool(spend_result.get("ok", false)):
+		_queue_combat_event("daomaster_active_used", {
+			"daomaster_id": str(daomaster_active_runtime.daomaster_id),
+			"skill_id": daomaster_active_runtime.get_skill_id(),
+			"cost": int(spend_result.get("cost", 0)),
+			"power_before": before,
+			"power_after": daomaster_active_runtime.get_power()
+		})
+	return spend_result
+
+
+func _on_daomaster_active_pressed() -> void:
+	if not _is_normal_v1_pve():
+		_execute_legacy_dao_strike()
+		return
+	if game_over:
+		_show_failure(_game_over_action_message())
+		return
+	if daomaster_active_target_mode == "fuguan_beast_target":
+		daomaster_active_target_mode = ""
+		_show_failure("已取消负棺代受。")
+		_refresh_all()
+		return
+	var blocked: String = _active_block_reason()
+	if blocked != "":
+		_show_failure(blocked)
+		return
+	var skill_id: String = daomaster_active_runtime.get_skill_id()
+	match skill_id:
+		PveDaomasterActiveRuntimeScript.SKILL_FENGMAI_JIEYUE:
+			_use_fengmai_jieyue()
+		PveDaomasterActiveRuntimeScript.SKILL_YEFU_CANSHI:
+			_use_yefu_canshi()
+		PveDaomasterActiveRuntimeScript.SKILL_FUGUAN_DAISHOU:
+			_enter_fuguan_daishou_target_mode()
+		_:
+			_show_failure("当前道主暂无可用主动技能。")
+
+
+func _use_fengmai_jieyue() -> void:
+	var spend_result := _spend_daomaster_active()
+	if not bool(spend_result.get("ok", false)):
+		_show_failure(str(spend_result.get("reason", "道主势不足。")))
+		return
+	daomaster_active_runtime.activate_fengmai_guard()
+	_log("宰衡君发动【封脉界约】，获得 6 点阵势，并令下一次玩家火脉积蓄 -4。")
+	gain_formation(6, "封脉界约")
+	_refresh_all()
+
+
+func _use_yefu_canshi() -> void:
+	var check: Dictionary = daomaster_active_runtime.can_use_yefu(_player_fire_buildup())
+	if not bool(check.get("ok", false)):
+		_show_failure(str(check.get("reason", "夜覆残世暂不能发动。")))
+		return
+	var spend_result := _spend_daomaster_active()
+	if not bool(spend_result.get("ok", false)):
+		_show_failure(str(spend_result.get("reason", "道主势不足。")))
+		return
+	daomaster_active_runtime.activate_yefu()
+	_log("织夜君发动【夜覆残世】，玩家火脉失衡暂缓至下个玩家回合开始。")
+	_refresh_all()
+
+
+func _enter_fuguan_daishou_target_mode() -> void:
+	var check: Dictionary = daomaster_active_runtime.can_use_fuguan(_player_fire_buildup(), _has_own_beast())
+	if not bool(check.get("ok", false)):
+		_show_failure(str(check.get("reason", "负棺代受暂不能发动。")))
+		return
+	selected_card = {}
+	selected_card_view = null
+	selected_card_source = ""
+	selected_attacker = {"player_index": -1, "slot_index": -1}
+	daomaster_active_target_mode = "fuguan_beast_target"
+	_log("请选择一只己方承道兽承受火脉。")
+	_refresh_all()
+
+
+func _confirm_fuguan_daishou_target(owner_index: int, slot_type: String, slot_index: int) -> void:
+	if owner_index != 0 or slot_type != CardTypes.CHENGDAO:
+		_show_failure("请选择一只己方承道兽承受火脉。")
+		return
+	var beast: Dictionary = player_boards[0].get_card(CardTypes.CHENGDAO, slot_index)
+	if beast.is_empty() or not _is_target_alive(_get_beast_target_id(beast)):
+		_show_failure("目标承道兽无效。")
+		return
+	var player_fire := _player_fire_buildup()
+	var check: Dictionary = daomaster_active_runtime.can_use_fuguan(player_fire, true)
+	if not bool(check.get("ok", false)):
+		_show_failure(str(check.get("reason", "负棺代受暂不能发动。")))
+		return
+	var transferred := mini(5, player_fire)
+	if transferred <= 0:
+		_show_failure("当前没有可转移的火脉。")
+		return
+	var spend_result := _spend_daomaster_active()
+	if not bool(spend_result.get("ok", false)):
+		_show_failure(str(spend_result.get("reason", "道主势不足。")))
+		return
+	_reduce_pulse_buildup(_get_player_target_id(), "fire", transferred, "负棺代受")
+	var beast_target_id := _get_beast_target_id(beast)
+	_apply_pulse_buildup(beast_target_id, "fire", transferred, "负棺代受")
+	daomaster_active_runtime.mark_fuguan_beast(str(beast.get("beast_instance_id", "")))
+	_log("负棺僧发动【负棺代受】，将 %d 点火脉转移给【%s】。" % [transferred, str(beast.get("name", "承道兽"))])
+	daomaster_active_target_mode = ""
+	_refresh_all()
+
+
+func _daomaster_active_tooltip(active_reason: String) -> String:
+	if not _is_normal_v1_pve():
+		return "旧原型道主道击。"
+	var lines: Array[String] = [
+		daomaster_active_runtime.get_skill_name(),
+		daomaster_active_runtime.get_skill_description(),
+		"道主势：%d / %d" % [daomaster_active_runtime.get_power(), daomaster_active_runtime.get_max_power()],
+		"消耗：%d" % daomaster_active_runtime.get_active_cost()
+	]
+	if active_reason != "":
+		lines.append("不可用：%s" % active_reason)
+	for state_line in daomaster_active_runtime.get_visible_state_lines():
+		lines.append(str(state_line))
+	return _array_text_with_separator(lines, "\n")
+
+
 func add_current_daoxi(amount: int, source: String = "") -> int:
 	if game_state == null or amount == 0:
 		return 0
@@ -1236,6 +1434,7 @@ func _on_card_selected(card: Dictionary, view: CardView, source: String) -> void
 	selected_card_view = view
 	selected_card_source = source
 	selected_attacker = {"player_index": -1, "slot_index": -1}
+	daomaster_active_target_mode = ""
 	_update_operation_hint()
 	_update_selected_detail()
 	if discard_phase and game_mode != "pve":
@@ -1254,6 +1453,9 @@ func _on_card_selected(card: Dictionary, view: CardView, source: String) -> void
 func _on_central_battlefield_pressed() -> void:
 	if game_over:
 		_show_failure(_game_over_action_message())
+		return
+	if daomaster_active_target_mode != "":
+		_show_failure("请选择一只己方承道兽承受火脉。")
 		return
 	if discard_phase and game_mode != "pve":
 		_confirm_discard_selected_card()
@@ -1364,6 +1566,9 @@ func _on_battlefield_card_pressed(owner_index: int, slot_type: String, slot_inde
 	var active_index := game_state.active_player_index
 	var player := game_state.players[active_index]
 	var target := game_state.players[1 - active_index]
+	if daomaster_active_target_mode == "fuguan_beast_target":
+		_confirm_fuguan_daishou_target(owner_index, slot_type, slot_index)
+		return
 	if not selected_card.is_empty():
 		if str(selected_card.get("type", "")) == CardTypes.DAOFA and owner_index != active_index and slot_type == CardTypes.CHENGDAO:
 			_play_daofa(player, target, slot_type, slot_index)
@@ -1525,6 +1730,7 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 	var put_into_resolved_pile := true
 	var effects: Array = pve_effect_adapter.get_effects(resolved_card)
 	var source_id := str(resolved_card.get("instance_id", resolved_card.get("id", card_name)))
+	is_resolving_v1_card = true
 	for effect in effects:
 		if typeof(effect) != TYPE_DICTIONARY:
 			continue
@@ -1583,9 +1789,11 @@ func _play_v1_selected_card(player: PlayerState, target_mode: String) -> void:
 					])
 			"summon":
 				if not _commit_v1_summon_plan(summon_plan):
+					is_resolving_v1_card = false
 					_handle_v1_summon_internal_failure(player, before_daoxi, int(hand_entry.get("index", -1)), resolved_card, summon_plan)
 					return
 				put_into_resolved_pile = false
+	is_resolving_v1_card = false
 	if put_into_resolved_pile:
 		_put_card_into_pve_resolved_pile(resolved_card)
 	Breakthrough.add_dao_progress(player, 5)
@@ -1941,26 +2149,47 @@ func _apply_pulse_buildup(target_id: String, pulse_id: String, amount: int, sour
 		push_error("[BattleScene] %s" % reason)
 		_log(reason)
 		return {"ok": false, "reason": reason}
-	var result: Dictionary = pve_pulse_runtime.add_buildup(target_id, pulse_id, amount)
+	var actual_amount := amount
+	if _is_normal_v1_pve() and target_id == _get_player_target_id() and pulse_id == "fire":
+		var guard_result: Dictionary = daomaster_active_runtime.consume_fengmai_guard(actual_amount)
+		if bool(guard_result.get("consumed", false)):
+			actual_amount = int(guard_result.get("after", actual_amount))
+			_log("封脉界约：火脉积蓄 %d -> %d。" % [int(guard_result.get("before", amount)), actual_amount])
+	if actual_amount <= 0:
+		_log("%s火脉积蓄被完全抵消。" % _target_display_name(target_id))
+		return {
+			"ok": true,
+			"reason": "",
+			"target_id": target_id,
+			"pulse_id": pulse_id,
+			"before": pve_pulse_runtime.get_buildup(target_id, pulse_id),
+			"added": 0,
+			"after": pve_pulse_runtime.get_buildup(target_id, pulse_id),
+			"breaks": 0,
+			"threshold": PvePulseRuntimeScript.FIRE_THRESHOLD
+		}
+	var use_deferred := _is_normal_v1_pve() and target_id == _get_player_target_id() and pulse_id == "fire" and bool(daomaster_active_runtime.yefu_deferred_active)
+	var result: Dictionary = pve_pulse_runtime.add_buildup_deferred(target_id, pulse_id, actual_amount) if use_deferred else pve_pulse_runtime.add_buildup(target_id, pulse_id, actual_amount)
 	if not bool(result.get("ok", false)):
 		_log(str(result.get("reason", "火脉积蓄失败。")))
 		return result
 	_queue_combat_event("pulse_buildup_changed", {
 		"target_id": target_id,
 		"pulse_id": pulse_id,
-		"amount": amount,
+		"amount": actual_amount,
 		"before": int(result.get("before", 0)),
 		"after": int(result.get("after", 0)),
 		"source_id": source_id
 	})
+	if use_deferred:
+		_log("夜覆残世：火脉积蓄暂缓失衡，当前 %d / %d。" % [
+			int(result.get("after", 0)),
+			int(result.get("threshold", PvePulseRuntimeScript.FIRE_THRESHOLD))
+		])
+		_drain_combat_events()
+		return result
 	var breaks := int(result.get("breaks", 0))
-	for _i in range(breaks):
-		_queue_combat_event("pulse_break_triggered", {
-			"target_id": target_id,
-			"pulse_id": pulse_id,
-			"source_id": source_id
-		})
-		_apply_fire_break_status(target_id, source_id)
+	_apply_pulse_breaks(target_id, pulse_id, breaks, source_id)
 	_drain_combat_events()
 	return result
 
@@ -2006,6 +2235,38 @@ func _apply_fire_break_status(target_id: String, source_id: String = "") -> void
 		stacks,
 		int(status.get("stacks", 0))
 	])
+
+
+func _apply_pulse_breaks(target_id: String, pulse_id: String, breaks: int, source_id: String = "") -> void:
+	for _i in range(breaks):
+		_queue_combat_event("pulse_break_triggered", {
+			"target_id": target_id,
+			"pulse_id": pulse_id,
+			"source_id": source_id
+		})
+		if pulse_id == "fire":
+			_apply_fire_break_status(target_id, source_id)
+
+
+func _resolve_deferred_pulse_thresholds(target_id: String, pulse_id: String, source_id: String = "") -> Dictionary:
+	if pve_pulse_runtime == null:
+		return {"ok": false, "reason": "脉冲运行时未初始化。"}
+	var result: Dictionary = pve_pulse_runtime.resolve_thresholds(target_id, pulse_id)
+	if not bool(result.get("ok", false)):
+		return result
+	var breaks := int(result.get("breaks", 0))
+	if breaks > 0:
+		_queue_combat_event("pulse_buildup_changed", {
+			"target_id": target_id,
+			"pulse_id": pulse_id,
+			"amount": 0,
+			"before": int(result.get("before", 0)),
+			"after": int(result.get("after", 0)),
+			"source_id": source_id
+		})
+		_apply_pulse_breaks(target_id, pulse_id, breaks, source_id)
+		_drain_combat_events()
+	return result
 
 
 func _apply_combat_status(target_id: String, status_spec: Dictionary) -> Dictionary:
@@ -2159,7 +2420,10 @@ func _format_target_runtime_state(target_id: String) -> String:
 	if pve_pulse_runtime != null:
 		var fire: int = pve_pulse_runtime.get_buildup(target_id, "fire")
 		if fire > 0:
-			parts.append("火脉 %d / %d" % [fire, PvePulseRuntimeScript.FIRE_THRESHOLD])
+			var deferred_suffix := ""
+			if _is_normal_v1_pve() and target_id == _get_player_target_id() and bool(daomaster_active_runtime.yefu_deferred_active):
+				deferred_suffix = "（夜覆封存）"
+			parts.append("火脉 %d / %d%s" % [fire, PvePulseRuntimeScript.FIRE_THRESHOLD, deferred_suffix])
 	if pve_status_runtime != null:
 		var zhuomai: Dictionary = pve_status_runtime.get_status(target_id, "zhuomai")
 		if not zhuomai.is_empty():
@@ -2305,6 +2569,13 @@ func _on_basic_attack_pressed() -> void:
 
 
 func _on_dao_strike_pressed() -> void:
+	if _is_normal_v1_pve():
+		_on_daomaster_active_pressed()
+		return
+	_execute_legacy_dao_strike()
+
+
+func _execute_legacy_dao_strike() -> void:
 	if game_over:
 		_show_failure(_game_over_action_message())
 		return
@@ -2437,6 +2708,7 @@ func _start_pve_player_turn(player: PlayerState, is_first_turn: bool = false) ->
 	game_state.active_player_index = 0
 	if not is_first_turn:
 		game_state.turn_number += 1
+	_process_daomaster_active_turn_start()
 	player.formation_value = 0
 	_restore_pve_daoxi(player)
 	dao_strike_used[player.id] = false
@@ -2445,7 +2717,31 @@ func _start_pve_player_turn(player: PlayerState, is_first_turn: bool = false) ->
 	if passive_runtime != null:
 		passive_runtime.on_player_turn_start()
 	_draw_cards(player, 5)
-	_log("玩家回合开始：打出手牌、指挥承道兽或使用道主道击。")
+	if _is_normal_v1_pve():
+		_log("玩家回合开始：打出手牌、指挥承道兽或使用道主主动技能。")
+	else:
+		_log("玩家回合开始：打出手牌、指挥承道兽或使用道主道击。")
+
+
+func _process_daomaster_active_turn_start() -> void:
+	if not _is_normal_v1_pve():
+		return
+	var transition: Dictionary = daomaster_active_runtime.begin_player_turn()
+	if bool(transition.get("fengmai_guard_expired", false)):
+		_log("封脉界约未被触发，已失效。")
+	if bool(transition.get("fuguan_mark_expired", false)):
+		_log("负棺代受标记自然失效。")
+	if bool(transition.get("yefu_should_resolve", false)):
+		var before := _player_fire_buildup()
+		var reduce_result := _reduce_pulse_buildup(_get_player_target_id(), "fire", 3, "夜覆残世")
+		var after_reduce := int(reduce_result.get("after", _player_fire_buildup()))
+		_log("夜覆残世解除：玩家火脉 %d -> %d，随后检查失衡。" % [before, after_reduce])
+		var resolve_result := _resolve_deferred_pulse_thresholds(_get_player_target_id(), "fire", "夜覆残世")
+		var breaks := int(resolve_result.get("breaks", 0))
+		if breaks > 0:
+			_log("夜覆残世：解除后触发 %d 次火脉失衡。" % breaks)
+	if bool(transition.get("yefu_lock_cleared", false)):
+		_log("夜覆残世锁定解除。")
 
 
 func _restore_pve_daoxi(player: PlayerState) -> void:
@@ -2607,6 +2903,7 @@ func _clear_selection() -> void:
 	selected_card_view = null
 	selected_card_source = ""
 	selected_attacker = {"player_index": -1, "slot_index": -1}
+	daomaster_active_target_mode = ""
 	if hand_view != null:
 		hand_view.clear_selection()
 	_clear_board_highlights()
@@ -2651,8 +2948,21 @@ func _refresh_all() -> void:
 	end_turn_button.disabled = game_over or manual_discard_active
 	attack_button.disabled = game_over or manual_discard_active
 	breakthrough_button.disabled = game_over or manual_discard_active or not Breakthrough.can_breakthrough(active_player)
-	dao_strike_button.disabled = game_over or manual_discard_active or bool(dao_strike_used.get(active_player.id, false))
-	dao_strike_button.text = "本回合已道击" if bool(dao_strike_used.get(active_player.id, false)) else "道主道击"
+	if _is_normal_v1_pve():
+		var active_reason := _active_block_reason()
+		var can_cancel_target := daomaster_active_target_mode != ""
+		dao_strike_button.disabled = (not can_cancel_target) and (game_over or manual_discard_active or active_reason != "")
+		dao_strike_button.text = "%s\n道主势 %d/%d｜消耗 %d" % [
+			"取消代受" if can_cancel_target else daomaster_active_runtime.get_skill_name(),
+			daomaster_active_runtime.get_power(),
+			daomaster_active_runtime.get_max_power(),
+			daomaster_active_runtime.get_active_cost()
+		]
+		dao_strike_button.tooltip_text = _daomaster_active_tooltip(active_reason)
+	else:
+		dao_strike_button.disabled = game_over or manual_discard_active or bool(dao_strike_used.get(active_player.id, false))
+		dao_strike_button.text = "本回合已道击" if bool(dao_strike_used.get(active_player.id, false)) else "道主道击"
+		dao_strike_button.tooltip_text = "旧原型道主道击。"
 	if next_round_button != null:
 		if game_mode == "pve":
 			next_round_button.disabled = true
@@ -2765,6 +3075,8 @@ func _refresh_resource_summary(player: PlayerState) -> void:
 		board_capacity,
 		game_state.turn_number
 	]
+	if _is_normal_v1_pve():
+		resource_summary_label.text += "\n%s" % _array_text_with_separator(daomaster_active_runtime.get_visible_state_lines(), "\n")
 
 
 func _refresh_hand_category_buttons(player: PlayerState) -> void:
@@ -3023,7 +3335,9 @@ func _refresh_central_battlefield() -> void:
 			central_battlefield_button.text = "中央战场区\n选择持续牌后点击这里打出。"
 		else:
 			central_battlefield_button.text = "中央战场区\n选择手牌后点击这里打出。"
-		if not selected_card.is_empty() and str(selected_card.get("type", "")) != CardTypes.DAOFA:
+		if daomaster_active_target_mode != "":
+			central_battlefield_button.modulate = Color(1.0, 0.92, 0.62, 1.0)
+		elif not selected_card.is_empty() and str(selected_card.get("type", "")) != CardTypes.DAOFA:
 			central_battlefield_button.modulate = Color(1.0, 0.92, 0.62, 1.0)
 		else:
 			central_battlefield_button.modulate = Color.WHITE
@@ -3087,6 +3401,8 @@ func _format_battlefield_card(owner_index: int, slot_type: String, card: Diction
 
 func _should_highlight_battlefield_card(owner_index: int, slot_type: String) -> bool:
 	var active_index := game_state.active_player_index
+	if daomaster_active_target_mode == "fuguan_beast_target":
+		return owner_index == active_index and slot_type == CardTypes.CHENGDAO
 	if owner_index == active_index:
 		return false
 	if slot_type != CardTypes.CHENGDAO:
@@ -3108,7 +3424,7 @@ func _on_help_pressed() -> void:
 	var label := Label.new()
 	label.custom_minimum_size = Vector2(420, 220)
 	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	label.text = "1. 道主牌不是手牌。\n2. 道主牌不进入承道位。\n3. 点击底部分类手牌选择卡牌。\n4. 持续牌点击中央战场区打出。\n5. 道法牌点击顶部敌人目标。\n6. 点击中央战场区己方承道兽选择攻击者，再点击敌人目标。\n7. 玩家回合开始固定抽 5 张，手牌上限 10。\n8. 结束回合会自动弃置非凝梦 / 保留手牌。\n9. 火脉积蓄达到 10 时会触发灼脉，超过阈值的积蓄会保留。\n10. 灼脉会在目标所属阵营回合结束时造成伤害，然后减少 1 层。"
+	label.text = "1. 道主牌不是手牌。\n2. 道主牌不进入承道位。\n3. 点击底部分类手牌选择卡牌。\n4. 持续牌点击中央战场区打出。\n5. 道法牌点击顶部敌人目标。\n6. 点击中央战场区己方承道兽选择攻击者，再点击敌人目标。\n7. 玩家回合开始固定抽 5 张，手牌上限 10。\n8. 结束回合会自动弃置非凝梦 / 保留手牌。\n9. 火脉积蓄达到 10 时会触发灼脉，超过阈值的积蓄会保留。\n10. 灼脉会在目标所属阵营回合结束时造成伤害，然后减少 1 层。\n11. 道主势达到 3 后可以发动主动技能。\n12. 正常 V1 PVE 中主动技能替代旧道主道击。\n13. 负棺代受需要再次选择承道兽目标。"
 	dialog.add_child(label)
 	add_child(dialog)
 	dialog.popup_centered(Vector2(460, 300))
@@ -3243,6 +3559,9 @@ func _update_operation_hint() -> void:
 			operation_hint_label.text = "弃牌阶段：手牌超过上限，请选择 %d 张手牌并点击中央战场区弃置。" % need_discard
 		else:
 			operation_hint_label.text = "已选择要弃置的牌【%s】，请点击中央战场区确认弃置。" % str(selected_card.get("name", "未知卡牌"))
+		return
+	if daomaster_active_target_mode == "fuguan_beast_target":
+		operation_hint_label.text = "请选择一只己方承道兽承受火脉。"
 		return
 	if _has_selected_attacker():
 		var beast := player_boards[game_state.active_player_index].get_card(CardTypes.CHENGDAO, int(selected_attacker.get("slot_index", -1)))
@@ -3549,6 +3868,12 @@ func _resolve_pve_beast_defeat(owner_index: int, beast_data: Dictionary) -> void
 		_log("【%s】命源归零，来源卡【%s】进入弃牌堆。" % [beast_name, str(source_card.get("name", beast_name))])
 		should_notify = true
 	if should_notify:
+		if _is_normal_v1_pve() and daomaster_active_runtime.on_marked_beast_died(str(beast_data.get("beast_instance_id", ""))):
+			_queue_combat_event("fuguan_marked_beast_died", {
+				"beast_instance_id": str(beast_data.get("beast_instance_id", "")),
+				"name": beast_name
+			})
+			_log("负棺代受：标记承道兽【%s】死亡，余骨资格已记录。" % beast_name)
 		_notify_chengdao_beast_died(owner_index, beast_data)
 	_drain_combat_events()
 
@@ -3571,6 +3896,7 @@ func _select_attacker(chengdao_index: int) -> void:
 	selected_card = {}
 	selected_card_view = null
 	selected_card_source = ""
+	daomaster_active_target_mode = ""
 	selected_attacker = {"player_index": game_state.active_player_index, "slot_index": chengdao_index}
 	_log("已选择承道兽【%s】作为攻击者。" % str(beast.get("name", "")))
 	_update_operation_hint()
@@ -3861,11 +4187,20 @@ func _format_dao_master_info(player: PlayerState) -> String:
 	if dao_master.is_empty():
 		return "道主位：未设置"
 	var stats: Dictionary = extra_stats.get(player.id, {"dao_breath": 0, "return_tide": 0})
-	var strike_text := "已使用" if bool(dao_strike_used.get(player.id, false)) else "可用"
+	var action_line := ""
+	if _is_normal_v1_pve():
+		action_line = "主动 %s｜势 %d/%d" % [
+			daomaster_active_runtime.get_skill_name(),
+			daomaster_active_runtime.get_power(),
+			daomaster_active_runtime.get_max_power()
+		]
+	else:
+		var strike_text := "已使用" if bool(dao_strike_used.get(player.id, false)) else "可用"
+		action_line = "道击 %s" % strike_text
 	var passive_name := str(dao_master.get("passive_name", ""))
 	if passive_name == "" and passive_runtime != null:
 		passive_name = passive_runtime.get_passive_name()
-	return "%s｜%s\n命源 %d/%d｜道脉 %s\n道息 %d｜阵势 %d｜回潮 %d\n道行 %d｜道击 %s\n被动：%s" % [
+	return "%s｜%s\n命源 %d/%d｜道脉 %s\n道息 %d｜阵势 %d｜回潮 %d\n道行 %d｜%s\n被动：%s" % [
 		str(dao_master.get("name", "未知道主")),
 		Realm.get_realm_name(player.combat_realm),
 		player.life_source,
@@ -3875,7 +4210,7 @@ func _format_dao_master_info(player: PlayerState) -> String:
 		player.formation_value,
 		int(stats.get("return_tide", 0)),
 		player.dao_progress,
-		strike_text,
+		action_line,
 		passive_name if passive_name != "" else "无"
 	]
 
