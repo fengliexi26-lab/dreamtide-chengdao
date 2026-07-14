@@ -29,6 +29,25 @@ func get_all_buildup(target_id: String) -> Dictionary:
 
 
 func add_buildup(target_id: String, pulse_id: String, amount: int) -> Dictionary:
+	var add_result := add_buildup_deferred(target_id, pulse_id, amount)
+	if not bool(add_result.get("ok", false)):
+		return add_result
+	var resolve_result := resolve_thresholds(target_id, pulse_id)
+	if not bool(resolve_result.get("ok", false)):
+		return resolve_result
+	return _result(
+		true,
+		"",
+		target_id,
+		pulse_id,
+		int(add_result.get("before", 0)),
+		amount,
+		int(resolve_result.get("after", 0)),
+		int(resolve_result.get("breaks", 0))
+	)
+
+
+func add_buildup_deferred(target_id: String, pulse_id: String, amount: int) -> Dictionary:
 	if target_id == "":
 		return _result(false, "target_id is required", target_id, pulse_id, 0, amount, 0, 0)
 	if not is_supported_pulse(pulse_id):
@@ -40,12 +59,26 @@ func add_buildup(target_id: String, pulse_id: String, amount: int) -> Dictionary
 	var target_buildup: Dictionary = buildup_by_target[target_id]
 	var before := int(target_buildup.get(pulse_id, 0))
 	var value := before + amount
+	target_buildup[pulse_id] = value
+	return _result(true, "", target_id, pulse_id, before, amount, value, 0)
+
+
+func resolve_thresholds(target_id: String, pulse_id: String) -> Dictionary:
+	if target_id == "":
+		return _result(false, "target_id is required", target_id, pulse_id, 0, 0, 0, 0)
+	if not is_supported_pulse(pulse_id):
+		return _result(false, "unsupported pulse_id", target_id, pulse_id, 0, 0, 0, 0)
+	if not buildup_by_target.has(target_id):
+		buildup_by_target[target_id] = {}
+	var target_buildup: Dictionary = buildup_by_target[target_id]
+	var before := int(target_buildup.get(pulse_id, 0))
+	var value := before
 	var breaks := 0
 	while value >= FIRE_THRESHOLD:
 		value -= FIRE_THRESHOLD
 		breaks += 1
 	target_buildup[pulse_id] = value
-	return _result(true, "", target_id, pulse_id, before, amount, value, breaks)
+	return _result(true, "", target_id, pulse_id, before, 0, value, breaks)
 
 
 func reduce_buildup(target_id: String, pulse_id: String, amount: int) -> Dictionary:
